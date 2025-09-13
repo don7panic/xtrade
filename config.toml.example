@@ -1,0 +1,63 @@
+# XTrade Configuration File Example
+# Copy this file to config.toml and modify as needed
+
+# Trading symbols to monitor by default
+symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+
+# UI refresh rate in milliseconds
+refresh_rate_ms = 100
+
+# OrderBook depth to display (number of price levels)
+orderbook_depth = 20
+
+# Enable price sparkline charts in TUI
+enable_sparkline = true
+
+# Logging level (trace, debug, info, warn, error)
+log_level = "info"
+
+[binance]
+# Binance WebSocket URL
+ws_url = "wss://stream.binance.com:9443"
+
+# Binance REST API URL  
+rest_url = "https://api.binance.com"
+
+# Request timeout in seconds
+timeout_seconds = 10
+
+# Reconnect interval in milliseconds
+reconnect_interval_ms = 5000
+
+# Maximum reconnection attempts (0 = unlimited)
+max_reconnect_attempts = 10
+
+[ui]
+# Enable colors in terminal output
+enable_colors = true
+
+# TUI update frequency in milliseconds
+update_interval_ms = 100
+
+# Maximum number of log entries to keep in memory
+max_log_entries = 1000
+
+# Default TUI theme (dark, light, custom)
+theme = "dark"
+
+[metrics]
+# Enable performance metrics collection
+enabled = true
+
+# Metrics collection interval in milliseconds
+collection_interval_ms = 1000
+
+# Keep metrics history for this many seconds
+history_duration_seconds = 300
+
+[sparkline]
+# Number of price points to keep for sparkline
+history_size = 60
+
+# Sparkline update interval in seconds
+update_interval_seconds = 1

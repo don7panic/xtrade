@@ -1,0 +1,66 @@
+[package]
+name = "xtrade"
+version = "0.1.0"
+edition = "2024"
+authors = ["XTrade Team"]
+description = "High-performance cryptocurrency market data monitor"
+license = "MIT"
+
+[dependencies]
+# CLI框架
+clap = { version = "4.4", features = ["derive"] }
+
+# 异步运行时
+tokio = { version = "1.35", features = ["full"] }
+
+# WebSocket客户端
+tokio-tungstenite = "0.21"
+
+# HTTP客户端  
+reqwest = { version = "0.11", features = ["json"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 错误处理
+anyhow = "1.0"
+thiserror = "2.0.0"
+
+# 数值精度
+ordered-float = "4.0"
+
+# 时间处理
+chrono = { version = "0.4", features = ["serde"] }
+
+# TUI界面
+ratatui = "0.25"
+crossterm = "0.27"
+
+# 配置管理
+config = "0.13"
+toml = "0.8"
+
+# 日志系统
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 指标收集
+metrics = "0.21"
+
+# 重连策略
+backoff = "0.4"
+
+# 终端颜色输出
+colored = "2.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.5"
+tempfile = "3.5"
+criterion = "0.5"
+
+# Benchmarks will be added later
+# [[bench]]
+# name = "orderbook_bench"
+# harness = false

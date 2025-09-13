@@ -1,0 +1,42 @@
+# XTrade Configuration File
+
+# Trading symbols to monitor by default
+symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+
+# UI refresh rate in milliseconds
+refresh_rate_ms = 100
+
+# OrderBook depth to display (number of price levels)
+orderbook_depth = 20
+
+# Enable price sparkline charts in TUI
+enable_sparkline = true
+
+# Logging level (trace, debug, info, warn, error)
+log_level = "info"
+
+[binance]
+# Binance WebSocket URL
+ws_url = "wss://stream.binance.com:9443"
+
+# Binance REST API URL  
+rest_url = "https://api.binance.com"
+
+# Request timeout in seconds
+timeout_seconds = 10
+
+# Reconnect interval in milliseconds
+reconnect_interval_ms = 1000
+
+# Maximum reconnection attempts
+max_reconnect_attempts = 10
+
+[ui]
+# Enable colors in terminal output
+enable_colors = true
+
+# TUI update rate in FPS
+update_rate_fps = 20
+
+# Sparkline history points
+sparkline_points = 60
