@@ -2450,7 +2450,9 @@ checksum = "c83b561d025642014097b66e6c1bb422783339e0909e4429cde4749d1990bc38"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite",
 ]
 
@@ -2602,6 +2604,7 @@ dependencies = [
  "http 1.3.1",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.8.5",
  "sha1",
  "thiserror 1.0.69",
@@ -3216,6 +3219,7 @@ dependencies = [
  "config",
  "criterion",
  "crossterm",
+ "futures-util",
  "metrics",
  "ordered-float",
  "ratatui",

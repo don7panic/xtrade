@@ -184,7 +184,7 @@ impl BinanceWebSocket {
 
 #### 验收标准
 
-- [ ] 成功连接到Binance WebSocket (wss://stream.binance.com:9443/ws)
+- [x] 成功连接到Binance WebSocket (wss://stream.binance.com:9443/ws)
 - [ ] 能够发送订阅消息并接收响应
 - [ ] 基础消息解析无错误，能打印接收到的消息
 - [ ] 连接状态变化有日志记录

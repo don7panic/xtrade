@@ -64,6 +64,9 @@ pub enum Commands {
         #[command(subcommand)]
         action: Option<ConfigAction>,
     },
+
+    /// Demo WebSocket functionality (for testing)
+    Demo,
 }
 
 #[derive(Subcommand, Debug)]

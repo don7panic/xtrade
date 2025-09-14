@@ -21,6 +21,7 @@ async fn main() -> AppResult<()> {
         Commands::Status => handle_status().await,
         Commands::Show { symbol } => handle_show(symbol).await,
         Commands::Config { action } => handle_config(action, &cli.config_file).await,
+        Commands::Demo => demo_websocket().await,
     }
 }
 
@@ -93,6 +94,67 @@ async fn handle_show(symbol: String) -> AppResult<()> {
     // TODO: Implement symbol detail display
     println!("📊 Showing details for: {}", symbol);
     println!("💡 This feature will be implemented in Week 2-3 of the sprint plan.");
+
+    Ok(())
+}
+
+/// Demo function showing WebSocket usage (for testing)
+async fn demo_websocket() -> AppResult<()> {
+    use xtrade::binance::BinanceWebSocket;
+
+    println!("🔌 Testing Binance WebSocket connection...");
+
+    // Create WebSocket client
+    let ws = BinanceWebSocket::new("wss://stream.binance.com:9443/ws");
+
+    // Check initial status
+    let status = ws.status().await;
+    println!("📡 Initial status: {:?}", status);
+
+    // Try to connect
+    match ws.connect().await {
+        Ok(()) => {
+            println!("✅ Connected successfully!");
+
+            // Start listening for messages
+            ws.start_listening().await?;
+            println!("👂 Started listening for messages...");
+
+            // Subscribe to BTCUSDT trades
+            ws.subscribe("BTCUSDT", "trade").await?;
+            println!("📈 Subscribed to BTCUSDT trades");
+
+            // Wait for a few messages
+            println!("⏳ Waiting for messages (3 seconds)...");
+
+            let start_time = std::time::Instant::now();
+            while start_time.elapsed() < std::time::Duration::from_secs(3) {
+                if let Some(message_result) = ws.next_message().await {
+                    match message_result {
+                        Ok(message) => {
+                            println!("📨 Received message: {:?}", message);
+                        }
+                        Err(error) => {
+                            println!("❌ Error receiving message: {}", error);
+                        }
+                    }
+                } else {
+                    // No messages available, sleep briefly to avoid busy waiting
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+
+            // Unsubscribe and disconnect
+            ws.unsubscribe("BTCUSDT", "trade").await?;
+            println!("📉 Unsubscribed from BTCUSDT trades");
+
+            ws.disconnect().await?;
+            println!("🔌 Disconnected successfully");
+        }
+        Err(e) => {
+            println!("❌ Connection failed: {}", e);
+        }
+    }
 
     Ok(())
 }
