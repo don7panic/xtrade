@@ -25,21 +25,23 @@ pub struct BinanceWebSocket {
     status: Arc<Mutex<ConnectionStatus>>,
     connection: Arc<Mutex<Option<WebSocketStream<MaybeTlsStream<TcpStream>>>>>,
     message_tx: mpsc::Sender<Result<BinanceMessage, WebSocketError>>,
-    message_rx: Arc<Mutex<mpsc::Receiver<Result<BinanceMessage, WebSocketError>>>>,
 }
 
 impl BinanceWebSocket {
     /// Create a new Binance WebSocket client
-    pub fn new(url: impl Into<String>) -> Self {
-        let (message_tx, message_rx) = mpsc::channel(100);
+    pub fn new(
+        url: impl Into<String>,
+    ) -> (Self, mpsc::Receiver<Result<BinanceMessage, WebSocketError>>) {
+        let (message_tx, message_rx) = mpsc::channel(1000); // Increased capacity for high-frequency data
 
-        Self {
+        let ws = Self {
             url: url.into(),
             status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
             connection: Arc::new(Mutex::new(None)),
             message_tx,
-            message_rx: Arc::new(Mutex::new(message_rx)),
-        }
+        };
+
+        (ws, message_rx)
     }
 
     /// Get current connection status
@@ -123,36 +125,52 @@ impl BinanceWebSocket {
         let status = self.status.clone();
 
         tokio::spawn(async move {
-            let mut connection = connection.lock().await;
-            if let Some(ws) = connection.as_mut() {
-                while let Some(message) = ws.next().await {
-                    match message {
-                        Ok(msg) => match Self::process_message(msg) {
-                            Ok(binance_msg) => {
-                                if let Err(e) = message_tx.send(Ok(binance_msg)).await {
-                                    error!("Failed to send message to channel: {}", e);
+            loop {
+                // Get connection temporarily for each message
+                let mut connection = connection.lock().await;
+                if let Some(ws) = connection.as_mut() {
+                    // Process messages without dropping connection while using ws
+                    if let Some(message) = ws.next().await {
+                        debug!("Raw WebSocket message received");
+                        match message {
+                            Ok(msg) => {
+                                debug!("Processing WebSocket message");
+                                match Self::process_message(msg) {
+                                    Ok(binance_msg) => {
+                                        debug!("Sending processed message to channel");
+                                        if let Err(e) = message_tx.send(Ok(binance_msg)).await {
+                                            error!("Failed to send message to channel: {}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Err(e) = message_tx.send(Err(e)).await {
+                                            error!("Failed to send error to channel: {}", e);
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
-                                if let Err(e) = message_tx.send(Err(e)).await {
+                                let error_msg = format!("WebSocket message error: {}", e);
+                                error!("{}", error_msg);
+                                let mut status = status.lock().await;
+                                *status = ConnectionStatus::Error(error_msg.clone());
+
+                                if let Err(e) = message_tx
+                                    .send(Err(WebSocketError::MessageError(error_msg)))
+                                    .await
+                                {
                                     error!("Failed to send error to channel: {}", e);
                                 }
                             }
-                        },
-                        Err(e) => {
-                            let error_msg = format!("WebSocket message error: {}", e);
-                            error!("{}", error_msg);
-                            let mut status = status.lock().await;
-                            *status = ConnectionStatus::Error(error_msg.clone());
-
-                            if let Err(e) = message_tx
-                                .send(Err(WebSocketError::MessageError(error_msg)))
-                                .await
-                            {
-                                error!("Failed to send error to channel: {}", e);
-                            }
                         }
+                    } else {
+                        // Connection closed
+                        break;
                     }
+                } else {
+                    // No connection, wait briefly and retry
+                    drop(connection);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         });
@@ -169,14 +187,15 @@ impl BinanceWebSocket {
                 // Try to parse as trade message first (most specific)
                 match serde_json::from_str::<TradeMessage>(&text) {
                     Ok(trade_msg) => {
-                        debug!("Received trade message: {:?}", trade_msg);
+                        info!("Received trade message: {:?}", trade_msg);
                         // Create a BinanceMessage for trade events
                         Ok(BinanceMessage {
                             stream: format!("{}@trade", trade_msg.symbol.to_lowercase()),
                             data: serde_json::json!(trade_msg),
                         })
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        debug!("Not a trade message: {}", e);
                         // Try to parse as response message
                         match serde_json::from_str::<BinanceResponse>(&text) {
                             Ok(response) => {
@@ -193,14 +212,18 @@ impl BinanceWebSocket {
                                     data: serde_json::json!({ "result": response.result }),
                                 })
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                debug!("Not a response message: {}", e);
                                 // Try to parse as Binance message last
                                 match serde_json::from_str::<BinanceMessage>(&text) {
                                     Ok(binance_msg) => Ok(binance_msg),
-                                    Err(e) => Err(WebSocketError::ParseError(format!(
-                                        "Failed to parse message: {} - {}",
-                                        text, e
-                                    ))),
+                                    Err(e) => {
+                                        warn!("Failed to parse message: {} - {}", text, e);
+                                        Err(WebSocketError::ParseError(format!(
+                                            "Failed to parse message: {} - {}",
+                                            text, e
+                                        )))
+                                    }
                                 }
                             }
                         }
@@ -232,12 +255,6 @@ impl BinanceWebSocket {
                 "Unsupported message type".to_string(),
             )),
         }
-    }
-
-    /// Get next message from the message channel
-    pub async fn next_message(&self) -> Option<Result<BinanceMessage, WebSocketError>> {
-        let mut rx = self.message_rx.lock().await;
-        rx.recv().await
     }
 
     /// Update connection status
@@ -278,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_websocket_creation() {
-        let ws = BinanceWebSocket::new("wss://test.binance.com/ws");
+        let (ws, _rx) = BinanceWebSocket::new("wss://test.binance.com/ws");
         block_on(async {
             let status = ws.status().await;
             assert_eq!(status, ConnectionStatus::Disconnected);
