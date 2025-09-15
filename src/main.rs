@@ -104,8 +104,8 @@ async fn demo_websocket() -> AppResult<()> {
 
     println!("🔌 Testing Binance WebSocket connection...");
 
-    // Create WebSocket client
-    let ws = BinanceWebSocket::new("wss://stream.binance.com:9443/ws");
+    // Create WebSocket client and get message receiver
+    let (ws, mut message_rx) = BinanceWebSocket::new("wss://stream.binance.com:9443/ws");
 
     // Check initial status
     let status = ws.status().await;
@@ -128,11 +128,18 @@ async fn demo_websocket() -> AppResult<()> {
             println!("⏳ Waiting for messages (3 seconds)...");
 
             let start_time = std::time::Instant::now();
-            while start_time.elapsed() < std::time::Duration::from_secs(3) {
-                if let Some(message_result) = ws.next_message().await {
+            let mut message_count = 0;
+            while start_time.elapsed() < std::time::Duration::from_secs(1) {
+                println!("🔍 Waiting for message from channel...");
+                if let Some(message_result) = message_rx.recv().await {
+                    println!("📬 Channel received message");
                     match message_result {
                         Ok(message) => {
-                            println!("📨 Received message: {:?}", message);
+                            message_count += 1;
+                            if message_count <= 10 {
+                                // Only show first 10 messages to avoid spam
+                                println!("📨 Received message: {:?}", message);
+                            }
                         }
                         Err(error) => {
                             println!("❌ Error receiving message: {}", error);
@@ -140,9 +147,12 @@ async fn demo_websocket() -> AppResult<()> {
                     }
                 } else {
                     // No messages available, sleep briefly to avoid busy waiting
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    println!("💤 No messages, sleeping...");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await; // Reduced sleep for better responsiveness
                 }
             }
+
+            println!("📊 Received {} messages in 3 seconds", message_count);
 
             // Unsubscribe and disconnect
             ws.unsubscribe("BTCUSDT", "trade").await?;
