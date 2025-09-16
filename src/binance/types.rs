@@ -1,6 +1,10 @@
 //! Binance API data types and structures
 
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::rest::BinanceRestClient;
 
 /// Connection status for WebSocket
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +69,64 @@ impl OrderBook {
             (Some(bid), Some(ask)) => Some(ask - bid),
             _ => None,
         }
+    }
+
+    /// Fetch orderbook snapshot from Binance REST API
+    pub async fn fetch_snapshot(&mut self, rest_client: &BinanceRestClient) -> Result<()> {
+        let snapshot = rest_client
+            .get_depth_snapshot_default(&self.symbol)
+            .await
+            .map_err(|e| anyhow!("Failed to fetch depth snapshot for {}: {}", self.symbol, e))?;
+
+        self.update_from_snapshot(snapshot)?;
+
+        Ok(())
+    }
+
+    /// Update orderbook from snapshot data
+    pub fn update_from_snapshot(&mut self, snapshot: DepthSnapshot) -> Result<()> {
+        // Clear existing data
+        self.bids.clear();
+        self.asks.clear();
+
+        // Process bids
+        for bid in snapshot.bids {
+            let price = bid[0]
+                .parse::<f64>()
+                .map_err(|e| anyhow!("Failed to parse bid price: {}", e))?;
+            let quantity = bid[1]
+                .parse::<f64>()
+                .map_err(|e| anyhow!("Failed to parse bid quantity: {}", e))?;
+
+            if quantity > 0.0 {
+                self.bids
+                    .insert(ordered_float::OrderedFloat(price), quantity);
+            }
+        }
+
+        // Process asks
+        for ask in snapshot.asks {
+            let price = ask[0]
+                .parse::<f64>()
+                .map_err(|e| anyhow!("Failed to parse ask price: {}", e))?;
+            let quantity = ask[1]
+                .parse::<f64>()
+                .map_err(|e| anyhow!("Failed to parse ask quantity: {}", e))?;
+
+            if quantity > 0.0 {
+                self.asks
+                    .insert(ordered_float::OrderedFloat(price), quantity);
+            }
+        }
+
+        // Update metadata
+        self.last_update_id = snapshot.last_update_id;
+        self.snapshot_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        Ok(())
     }
 }
 
@@ -138,6 +200,15 @@ pub struct OrderBookUpdate {
     #[serde(rename = "b")]
     pub bids: Vec<[String; 2]>,
     #[serde(rename = "a")]
+    pub asks: Vec<[String; 2]>,
+}
+
+/// Depth snapshot from Binance REST API
+#[derive(Debug, Deserialize)]
+pub struct DepthSnapshot {
+    #[serde(rename = "lastUpdateId")]
+    pub last_update_id: u64,
+    pub bids: Vec<[String; 2]>,
     pub asks: Vec<[String; 2]>,
 }
 
@@ -218,6 +289,23 @@ pub enum WebSocketError {
     IoError(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
+}
+
+/// Error types for REST API operations
+#[derive(Debug, thiserror::Error)]
+pub enum RestApiError {
+    #[error("HTTP request error: {0}")]
+    HttpRequestError(String),
+    #[error("HTTP status error: {0} - {1}")]
+    HttpStatusError(u16, String),
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    #[error("JSON error: {0}")]
+    JsonError(#[from] serde_json::Error),
+    #[error("Network error: {0}")]
+    NetworkError(String),
+    #[error("Invalid symbol: {0}")]
+    InvalidSymbol(String),
 }
 
 // Additional types will be added in subsequent days
