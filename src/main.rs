@@ -101,11 +101,16 @@ async fn handle_show(symbol: String) -> AppResult<()> {
 /// Demo function showing WebSocket usage (for testing)
 async fn demo_websocket() -> AppResult<()> {
     use xtrade::binance::BinanceWebSocket;
+    use xtrade::binance::rest::BinanceRestClient;
+    use xtrade::binance::types::{OrderBook, OrderBookUpdate};
 
-    println!("🔌 Testing Binance WebSocket connection...");
+    println!("🔌 Testing Binance WebSocket OrderBook incremental updates...");
 
     // Create WebSocket client and get message receiver
     let (ws, mut message_rx) = BinanceWebSocket::new("wss://stream.binance.com:9443/ws");
+
+    // Create REST client for fetching initial snapshot
+    let rest_client = BinanceRestClient::new("https://api.binance.com".to_string());
 
     // Check initial status
     let status = ws.status().await;
@@ -120,43 +125,191 @@ async fn demo_websocket() -> AppResult<()> {
             ws.start_listening().await?;
             println!("👂 Started listening for messages...");
 
-            // Subscribe to BTCUSDT trades
-            ws.subscribe("BTCUSDT", "trade").await?;
-            println!("📈 Subscribed to BTCUSDT trades");
+            // Create OrderBook and fetch initial snapshot
+            let mut orderbook = OrderBook::new("BTCUSDT".to_string());
+            println!("📊 Fetching initial OrderBook snapshot for BTCUSDT...");
 
-            // Wait for a few messages
-            println!("⏳ Waiting for messages (3 seconds)...");
-
-            let start_time = std::time::Instant::now();
-            let mut message_count = 0;
-            while start_time.elapsed() < std::time::Duration::from_secs(1) {
-                println!("🔍 Waiting for message from channel...");
-                if let Some(message_result) = message_rx.recv().await {
-                    println!("📬 Channel received message");
-                    match message_result {
-                        Ok(message) => {
-                            message_count += 1;
-                            if message_count <= 10 {
-                                // Only show first 10 messages to avoid spam
-                                println!("📨 Received message: {:?}", message);
-                            }
-                        }
-                        Err(error) => {
-                            println!("❌ Error receiving message: {}", error);
-                        }
-                    }
-                } else {
-                    // No messages available, sleep briefly to avoid busy waiting
-                    println!("💤 No messages, sleeping...");
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await; // Reduced sleep for better responsiveness
+            match orderbook.fetch_snapshot(&rest_client).await {
+                Ok(()) => {
+                    println!("✅ OrderBook snapshot fetched successfully!");
+                    println!("   📈 Best bid: {:?}", orderbook.best_bid());
+                    println!("   📉 Best ask: {:?}", orderbook.best_ask());
+                    println!("   📏 Spread: {:?}", orderbook.spread());
+                    println!(
+                        "   🏗️  Levels: bids={}, asks={}",
+                        orderbook.bids.len(),
+                        orderbook.asks.len()
+                    );
+                    println!("   🔢 Last update ID: {}", orderbook.last_update_id);
+                }
+                Err(e) => {
+                    println!("❌ Failed to fetch snapshot: {}", e);
+                    return Ok(());
                 }
             }
 
-            println!("📊 Received {} messages in 3 seconds", message_count);
+            // Subscribe to BTCUSDT depth stream at 100ms updates
+            println!("📈 Subscribing to BTCUSDT depth stream (100ms updates)...");
+            ws.subscribe_depth("BTCUSDT", Some(100)).await?;
+
+            // Wait for and process depth updates
+            println!("⏳ Processing depth updates for 10 seconds...");
+
+            let start_time = std::time::Instant::now();
+            let mut message_count = 0;
+            let mut update_count = 0;
+            let mut error_count = 0;
+
+            while start_time.elapsed() < std::time::Duration::from_secs(10) {
+                if let Some(message_result) = message_rx.recv().await {
+                    message_count += 1;
+
+                    match message_result {
+                        Ok(message) => {
+                            // Check if this is a depth update message
+                            if message.stream.contains("@depth") {
+                                // Try to parse as OrderBookUpdate
+                                match serde_json::from_value::<OrderBookUpdate>(message.data) {
+                                    Ok(depth_update) => {
+                                        update_count += 1;
+
+                                        // Apply the update to our OrderBook
+                                        match orderbook.apply_depth_update(depth_update) {
+                                            Ok(()) => {
+                                                if update_count <= 5 || update_count % 10 == 0 {
+                                                    println!(
+                                                        "✅ Update #{}: bid={:?}, ask={:?}, spread={:?}, levels={}",
+                                                        update_count,
+                                                        orderbook.best_bid(),
+                                                        orderbook.best_ask(),
+                                                        orderbook.spread(),
+                                                        orderbook.total_levels()
+                                                    );
+                                                }
+
+                                                // Validate consistency every 10 updates
+                                                if update_count % 10 == 0 {
+                                                    match orderbook.validate_consistency() {
+                                                        Ok(()) => {}
+                                                        Err(e) => {
+                                                            println!(
+                                                                "⚠️  Consistency check failed: {}",
+                                                                e
+                                                            );
+                                                            error_count += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error_count += 1;
+                                                use xtrade::binance::types::OrderBookError;
+
+                                                match &e {
+                                                    OrderBookError::StaleMessage { .. } => {
+                                                        if error_count <= 3 {
+                                                            println!(
+                                                                "ℹ️  Stale message (expected): {}",
+                                                                e
+                                                            );
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        println!(
+                                                            "❌ OrderBook update error: {}",
+                                                            e
+                                                        );
+                                                        println!("   Severity: {:?}", e.severity());
+                                                        println!(
+                                                            "   Recoverable: {}",
+                                                            e.is_recoverable()
+                                                        );
+                                                        println!(
+                                                            "   Requires resync: {}",
+                                                            e.requires_resync()
+                                                        );
+
+                                                        if e.requires_resync() {
+                                                            println!(
+                                                                "🔄 Re-fetching snapshot due to error..."
+                                                            );
+                                                            if let Err(snapshot_err) = orderbook
+                                                                .fetch_snapshot(&rest_client)
+                                                                .await
+                                                            {
+                                                                println!(
+                                                                    "❌ Failed to re-fetch snapshot: {}",
+                                                                    snapshot_err
+                                                                );
+                                                            } else {
+                                                                println!(
+                                                                    "✅ Snapshot re-fetched successfully"
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if error_count <= 3 {
+                                            println!("❌ Failed to parse depth update: {}", e);
+                                        }
+                                        error_count += 1;
+                                    }
+                                }
+                            } else {
+                                // Non-depth message (response, etc.)
+                                if message_count <= 3 {
+                                    println!("📨 Non-depth message: {}", message.stream);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            error_count += 1;
+                            if error_count <= 3 {
+                                println!("❌ Error receiving message: {}", error);
+                            }
+                        }
+                    }
+                } else {
+                    // No messages available, sleep briefly
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+
+            println!("\n📊 Test Results Summary:");
+            println!("   📬 Total messages: {}", message_count);
+            println!("   🔄 Depth updates processed: {}", update_count);
+            println!("   ❌ Errors encountered: {}", error_count);
+            println!("   📈 Final best bid: {:?}", orderbook.best_bid());
+            println!("   📉 Final best ask: {:?}", orderbook.best_ask());
+            println!("   📏 Final spread: {:?}", orderbook.spread());
+            println!("   🏗️  Final levels: {}", orderbook.total_levels());
+            println!(
+                "   💰 Total bid volume: {:.2}",
+                orderbook.total_bid_volume()
+            );
+            println!(
+                "   💰 Total ask volume: {:.2}",
+                orderbook.total_ask_volume()
+            );
+
+            // Performance metrics
+            let updates_per_second = update_count as f64 / 10.0;
+            println!("   ⚡ Updates per second: {:.1}", updates_per_second);
+
+            if error_count == 0 {
+                println!("✅ All updates processed successfully!");
+            } else {
+                let error_rate = (error_count as f64 / message_count as f64) * 100.0;
+                println!("⚠️  Error rate: {:.1}%", error_rate);
+            }
 
             // Unsubscribe and disconnect
-            ws.unsubscribe("BTCUSDT", "trade").await?;
-            println!("📉 Unsubscribed from BTCUSDT trades");
+            ws.unsubscribe("BTCUSDT", "depth@100ms").await?;
+            println!("📉 Unsubscribed from BTCUSDT depth stream");
 
             ws.disconnect().await?;
             println!("🔌 Disconnected successfully");
