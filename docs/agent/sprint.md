@@ -241,10 +241,10 @@ impl OrderBook {
 
 #### 验收标准
 
-- [ ] 成功获取BTCUSDT的OrderBook快照
-- [ ] 快照数据正确解析到BTreeMap结构
-- [ ] 价格排序正确（bids降序，asks升序）
-- [ ] 包含last_update_id字段用于后续增量更新验证
+- [x] 成功获取BTCUSDT的OrderBook快照
+- [x] 快照数据正确解析到BTreeMap结构
+- [x] 价格排序正确（bids降序，asks升序）
+- [x] 包含last_update_id字段用于后续增量更新验证
 
 ---
 

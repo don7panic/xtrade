@@ -15,8 +15,8 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use super::types::{
-    BinanceMessage, BinanceResponse, ConnectionStatus, SubscribeRequest, TradeMessage,
-    UnsubscribeRequest, WebSocketError,
+    BinanceMessage, BinanceResponse, ConnectionStatus, OrderBookUpdate, SubscribeRequest,
+    TradeMessage, UnsubscribeRequest, WebSocketError,
 };
 
 /// Binance WebSocket client
@@ -106,6 +106,38 @@ impl BinanceWebSocket {
         Ok(())
     }
 
+    /// Subscribe to depth stream for a symbol with specified update speed
+    /// Binance supports depth streams with different update speeds:
+    /// - 1000ms: "depth"
+    /// - 100ms: "depth@100ms"
+    pub async fn subscribe_depth(&self, symbol: &str, update_speed_ms: Option<u16>) -> Result<()> {
+        let stream_type = match update_speed_ms {
+            Some(100) => "depth@100ms",
+            Some(1000) | None => "depth",
+            Some(speed) => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported depth update speed: {}ms. Supported: 100ms, 1000ms",
+                    speed
+                ));
+            }
+        };
+
+        self.subscribe(symbol, stream_type).await?;
+        info!(
+            "Subscribed to depth stream for {} with {}ms updates",
+            symbol,
+            update_speed_ms.unwrap_or(1000)
+        );
+        Ok(())
+    }
+
+    /// Subscribe to trade stream for a symbol  
+    pub async fn subscribe_trade(&self, symbol: &str) -> Result<()> {
+        self.subscribe(symbol, "trade").await?;
+        info!("Subscribed to trade stream for {}", symbol);
+        Ok(())
+    }
+
     /// Send a message through the WebSocket
     async fn send_message(&self, message: Message) -> Result<()> {
         let mut connection = self.connection.lock().await;
@@ -184,45 +216,74 @@ impl BinanceWebSocket {
             Message::Text(text) => {
                 debug!("Received WebSocket message: {}", text);
 
-                // Try to parse as trade message first (most specific)
-                match serde_json::from_str::<TradeMessage>(&text) {
-                    Ok(trade_msg) => {
-                        info!("Received trade message: {:?}", trade_msg);
-                        // Create a BinanceMessage for trade events
+                // Try to parse as depth update message first (most common for orderbook)
+                match serde_json::from_str::<OrderBookUpdate>(&text) {
+                    Ok(depth_update) => {
+                        debug!(
+                            "Received depth update message: symbol={}, first_id={}, final_id={}, bids={}, asks={}",
+                            depth_update.symbol,
+                            depth_update.first_update_id,
+                            depth_update.final_update_id,
+                            depth_update.bids.len(),
+                            depth_update.asks.len()
+                        );
+                        // Create a BinanceMessage for depth events
                         Ok(BinanceMessage {
-                            stream: format!("{}@trade", trade_msg.symbol.to_lowercase()),
-                            data: serde_json::json!(trade_msg),
+                            stream: format!("{}@depth", depth_update.symbol.to_lowercase()),
+                            data: serde_json::json!(depth_update),
                         })
                     }
                     Err(e) => {
-                        debug!("Not a trade message: {}", e);
-                        // Try to parse as response message
-                        match serde_json::from_str::<BinanceResponse>(&text) {
-                            Ok(response) => {
-                                debug!("Received response: {:?}", response);
-                                if response.error.is_some() {
-                                    return Err(WebSocketError::SubscriptionError(format!(
-                                        "Subscription error: {:?}",
-                                        response.error
-                                    )));
-                                }
-                                // Create a generic BinanceMessage for responses
+                        debug!("Not a depth update message: {}", e);
+                        // Try to parse as trade message
+                        match serde_json::from_str::<TradeMessage>(&text) {
+                            Ok(trade_msg) => {
+                                debug!(
+                                    "Received trade message: symbol={}, price={}, quantity={}",
+                                    trade_msg.symbol, trade_msg.price, trade_msg.quantity
+                                );
+                                // Create a BinanceMessage for trade events
                                 Ok(BinanceMessage {
-                                    stream: "response".to_string(),
-                                    data: serde_json::json!({ "result": response.result }),
+                                    stream: format!("{}@trade", trade_msg.symbol.to_lowercase()),
+                                    data: serde_json::json!(trade_msg),
                                 })
                             }
                             Err(e) => {
-                                debug!("Not a response message: {}", e);
-                                // Try to parse as Binance message last
-                                match serde_json::from_str::<BinanceMessage>(&text) {
-                                    Ok(binance_msg) => Ok(binance_msg),
+                                debug!("Not a trade message: {}", e);
+                                // Try to parse as response message
+                                match serde_json::from_str::<BinanceResponse>(&text) {
+                                    Ok(response) => {
+                                        debug!("Received response: {:?}", response);
+                                        if response.error.is_some() {
+                                            return Err(WebSocketError::SubscriptionError(
+                                                format!("Subscription error: {:?}", response.error),
+                                            ));
+                                        }
+                                        // Create a generic BinanceMessage for responses
+                                        Ok(BinanceMessage {
+                                            stream: "response".to_string(),
+                                            data: serde_json::json!({ "result": response.result }),
+                                        })
+                                    }
                                     Err(e) => {
-                                        warn!("Failed to parse message: {} - {}", text, e);
-                                        Err(WebSocketError::ParseError(format!(
-                                            "Failed to parse message: {} - {}",
-                                            text, e
-                                        )))
+                                        debug!("Not a response message: {}", e);
+                                        // Try to parse as generic Binance message last
+                                        match serde_json::from_str::<BinanceMessage>(&text) {
+                                            Ok(binance_msg) => {
+                                                debug!(
+                                                    "Received generic Binance message: stream={}",
+                                                    binance_msg.stream
+                                                );
+                                                Ok(binance_msg)
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to parse message: {} - {}", text, e);
+                                                Err(WebSocketError::ParseError(format!(
+                                                    "Failed to parse message: {} - {}",
+                                                    text, e
+                                                )))
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -128,6 +128,193 @@ impl OrderBook {
 
         Ok(())
     }
+
+    /// Apply incremental depth update to orderbook
+    /// Implements Binance's official update sequence validation
+    pub fn apply_depth_update(&mut self, update: OrderBookUpdate) -> Result<(), OrderBookError> {
+        use tracing::{debug, warn};
+
+        // Validate symbol match
+        if update.symbol != self.symbol {
+            return Err(OrderBookError::SymbolMismatch {
+                expected: self.symbol.clone(),
+                actual: update.symbol,
+            });
+        }
+
+        // Sequence number validation according to Binance documentation:
+        // 1. Drop any event where first_update_id <= lastUpdateId in the snapshot
+        if update.first_update_id <= self.last_update_id {
+            debug!(
+                "Discarding stale update: first_update_id {} <= last_update_id {}",
+                update.first_update_id, self.last_update_id
+            );
+            return Err(OrderBookError::StaleMessage {
+                update_id: update.first_update_id,
+                snapshot_id: self.last_update_id,
+            });
+        }
+
+        // 2. The first processed event should have first_update_id <= lastUpdateId+1 AND final_update_id >= lastUpdateId+1
+        if self.last_update_id > 0 && update.first_update_id > self.last_update_id + 1 {
+            warn!(
+                "Sequence gap detected: expected first_update_id <= {}, got {}",
+                self.last_update_id + 1,
+                update.first_update_id
+            );
+            return Err(OrderBookError::SequenceValidationFailed {
+                expected: self.last_update_id + 1,
+                actual: update.first_update_id,
+            });
+        }
+
+        debug!(
+            "Applying depth update for {}: first_id={}, final_id={}, bids={}, asks={}",
+            update.symbol,
+            update.first_update_id,
+            update.final_update_id,
+            update.bids.len(),
+            update.asks.len()
+        );
+
+        // Apply bid updates
+        for bid in update.bids {
+            let price = bid[0]
+                .parse::<f64>()
+                .map_err(|e| OrderBookError::PriceParseError(format!("bid price: {}", e)))?;
+            let quantity = bid[1]
+                .parse::<f64>()
+                .map_err(|e| OrderBookError::QuantityParseError(format!("bid quantity: {}", e)))?;
+
+            let price_key = ordered_float::OrderedFloat(price);
+
+            if quantity == 0.0 {
+                // Remove price level when quantity is 0
+                if let Some(removed_qty) = self.bids.remove(&price_key) {
+                    debug!(
+                        "Removed bid level at price {}: quantity {}",
+                        price, removed_qty
+                    );
+                }
+            } else if quantity > 0.0 {
+                // Update or insert price level
+                let previous_qty = self.bids.insert(price_key, quantity);
+                debug!(
+                    "Updated bid level at price {}: {} -> {}",
+                    price,
+                    previous_qty.unwrap_or(0.0),
+                    quantity
+                );
+            } else {
+                return Err(OrderBookError::InvalidUpdate(format!(
+                    "Invalid bid quantity: {}",
+                    quantity
+                )));
+            }
+        }
+
+        // Apply ask updates
+        for ask in update.asks {
+            let price = ask[0]
+                .parse::<f64>()
+                .map_err(|e| OrderBookError::PriceParseError(format!("ask price: {}", e)))?;
+            let quantity = ask[1]
+                .parse::<f64>()
+                .map_err(|e| OrderBookError::QuantityParseError(format!("ask quantity: {}", e)))?;
+
+            let price_key = ordered_float::OrderedFloat(price);
+
+            if quantity == 0.0 {
+                // Remove price level when quantity is 0
+                if let Some(removed_qty) = self.asks.remove(&price_key) {
+                    debug!(
+                        "Removed ask level at price {}: quantity {}",
+                        price, removed_qty
+                    );
+                }
+            } else if quantity > 0.0 {
+                // Update or insert price level
+                let previous_qty = self.asks.insert(price_key, quantity);
+                debug!(
+                    "Updated ask level at price {}: {} -> {}",
+                    price,
+                    previous_qty.unwrap_or(0.0),
+                    quantity
+                );
+            } else {
+                return Err(OrderBookError::InvalidUpdate(format!(
+                    "Invalid ask quantity: {}",
+                    quantity
+                )));
+            }
+        }
+
+        // Update sequence tracking
+        self.last_update_id = update.final_update_id;
+
+        debug!(
+            "Applied depth update successfully. New last_update_id: {}, bids: {}, asks: {}",
+            self.last_update_id,
+            self.bids.len(),
+            self.asks.len()
+        );
+
+        Ok(())
+    }
+
+    /// Validates that the OrderBook is in a consistent state
+    pub fn validate_consistency(&self) -> Result<(), OrderBookError> {
+        // Check that best bid < best ask (if both exist)
+        if let (Some(best_bid), Some(best_ask)) = (self.best_bid(), self.best_ask()) {
+            if best_bid >= best_ask {
+                return Err(OrderBookError::InvalidUpdate(format!(
+                    "Invalid spread: best_bid {} >= best_ask {}",
+                    best_bid, best_ask
+                )));
+            }
+        }
+
+        // Check for negative quantities (should never happen with our logic)
+        for (price, qty) in &self.bids {
+            if *qty <= 0.0 {
+                return Err(OrderBookError::InvalidUpdate(format!(
+                    "Invalid bid quantity {} at price {}",
+                    qty, price.0
+                )));
+            }
+        }
+
+        for (price, qty) in &self.asks {
+            if *qty <= 0.0 {
+                return Err(OrderBookError::InvalidUpdate(format!(
+                    "Invalid ask quantity {} at price {}",
+                    qty, price.0
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Gets the total number of price levels in the orderbook
+    pub fn total_levels(&self) -> usize {
+        self.bids.len() + self.asks.len()
+    }
+
+    /// Gets the total volume on the bid side
+    pub fn total_bid_volume(&self) -> f64 {
+        self.bids.values().sum()
+    }
+
+    /// Gets the total volume on the ask side  
+    pub fn total_ask_volume(&self) -> f64 {
+        self.asks.values().sum()
+    }
+
+    /// Checks if the orderbook has sufficient data for trading decisions
+    pub fn has_sufficient_depth(&self, min_levels: usize) -> bool {
+        self.bids.len() >= min_levels && self.asks.len() >= min_levels
+    }
 }
 
 impl Default for OrderBook {
@@ -185,7 +372,7 @@ pub struct BinanceResponse {
 }
 
 /// OrderBook update message from Binance
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct OrderBookUpdate {
     #[serde(rename = "e")]
     pub event_type: String,
@@ -306,6 +493,71 @@ pub enum RestApiError {
     NetworkError(String),
     #[error("Invalid symbol: {0}")]
     InvalidSymbol(String),
+}
+
+/// Error types for OrderBook operations
+#[derive(Debug, thiserror::Error)]
+pub enum OrderBookError {
+    #[error("Sequence validation failed: expected first_update_id > {expected}, got {actual}")]
+    SequenceValidationFailed { expected: u64, actual: u64 },
+    #[error(
+        "Stale message received: update_id {update_id} <= snapshot last_update_id {snapshot_id}"
+    )]
+    StaleMessage { update_id: u64, snapshot_id: u64 },
+    #[error("Price parse error: {0}")]
+    PriceParseError(String),
+    #[error("Quantity parse error: {0}")]
+    QuantityParseError(String),
+    #[error("Symbol mismatch: expected {expected}, got {actual}")]
+    SymbolMismatch { expected: String, actual: String },
+    #[error("Invalid update: {0}")]
+    InvalidUpdate(String),
+}
+
+impl OrderBookError {
+    /// Returns true if this error is recoverable (e.g., can continue processing other messages)
+    pub fn is_recoverable(&self) -> bool {
+        match self {
+            OrderBookError::StaleMessage { .. } => true, // Can safely ignore stale messages
+            OrderBookError::PriceParseError(_) => false, // Data corruption, need fresh snapshot
+            OrderBookError::QuantityParseError(_) => false, // Data corruption, need fresh snapshot
+            OrderBookError::SequenceValidationFailed { .. } => false, // Need to re-sync
+            OrderBookError::SymbolMismatch { .. } => true, // Wrong symbol, can ignore
+            OrderBookError::InvalidUpdate(_) => false,   // Data integrity issue
+        }
+    }
+
+    /// Returns true if this error requires fetching a new orderbook snapshot
+    pub fn requires_resync(&self) -> bool {
+        match self {
+            OrderBookError::SequenceValidationFailed { .. } => true,
+            OrderBookError::PriceParseError(_) => true,
+            OrderBookError::QuantityParseError(_) => true,
+            OrderBookError::InvalidUpdate(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns the error severity level
+    pub fn severity(&self) -> ErrorSeverity {
+        match self {
+            OrderBookError::StaleMessage { .. } => ErrorSeverity::Info,
+            OrderBookError::SymbolMismatch { .. } => ErrorSeverity::Warning,
+            OrderBookError::SequenceValidationFailed { .. } => ErrorSeverity::Error,
+            OrderBookError::PriceParseError(_) => ErrorSeverity::Critical,
+            OrderBookError::QuantityParseError(_) => ErrorSeverity::Critical,
+            OrderBookError::InvalidUpdate(_) => ErrorSeverity::Error,
+        }
+    }
+}
+
+/// Error severity levels for OrderBook operations
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorSeverity {
+    Info,     // Can be ignored
+    Warning,  // Should be logged but processing can continue
+    Error,    // Requires action but system can recover
+    Critical, // Requires immediate resync/restart
 }
 
 // Additional types will be added in subsequent days
