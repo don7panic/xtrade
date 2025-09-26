@@ -2,6 +2,7 @@
 //!
 //! Handles WebSocket connections, REST API calls, and data parsing for Binance.
 
+pub mod demo;
 pub mod rest;
 pub mod types;
 pub mod websocket;
