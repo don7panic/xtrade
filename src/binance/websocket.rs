@@ -15,8 +15,8 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use super::types::{
-    BinanceMessage, BinanceResponse, ConnectionStatus, OrderBookUpdate, SubscribeRequest,
-    TradeMessage, UnsubscribeRequest, WebSocketError,
+    BinanceEventType, BinanceMessage, BinanceResponse, ConnectionStatus, OrderBookUpdate,
+    SubscribeRequest, Ticker24hr, TradeMessage, UnsubscribeRequest, WebSocketError,
 };
 
 /// Binance WebSocket client
@@ -228,15 +228,43 @@ impl BinanceWebSocket {
         Ok(())
     }
 
+    /// Classify message based on event type
+    fn classify_message(value: &serde_json::Value) -> Option<BinanceEventType> {
+        value
+            .get("e")
+            .and_then(|v| v.as_str())
+            .and_then(|event_type| match event_type {
+                "depthUpdate" => Some(BinanceEventType::DepthUpdate),
+                "trade" => Some(BinanceEventType::Trade),
+                "24hrTicker" => Some(BinanceEventType::Ticker24hr),
+                "kline" => Some(BinanceEventType::Kline),
+                "aggTrade" => Some(BinanceEventType::AggregatedTrade),
+                _ => None,
+            })
+    }
+
     /// Process incoming WebSocket message
     fn process_message(msg: Message) -> Result<BinanceMessage, WebSocketError> {
         match msg {
             Message::Text(text) => {
                 debug!("Received WebSocket message: {}", text);
 
-                // Try to parse as depth update message first (most common for orderbook)
-                match serde_json::from_str::<OrderBookUpdate>(&text) {
-                    Ok(depth_update) => {
+                // Single parse to JSON value first
+                let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                    WebSocketError::ParseError(format!("Failed to parse JSON: {}", e))
+                })?;
+
+                // Classify message based on event type
+                match Self::classify_message(&value) {
+                    Some(BinanceEventType::DepthUpdate) => {
+                        let depth_update: OrderBookUpdate =
+                            serde_json::from_value(value).map_err(|e| {
+                                WebSocketError::ParseError(format!(
+                                    "Failed to parse depth update: {}",
+                                    e
+                                ))
+                            })?;
+
                         debug!(
                             "Received depth update message: symbol={}, first_id={}, final_id={}, bids={}, asks={}",
                             depth_update.symbol,
@@ -245,67 +273,68 @@ impl BinanceWebSocket {
                             depth_update.bids.len(),
                             depth_update.asks.len()
                         );
-                        // Create a BinanceMessage for depth events
+
                         Ok(BinanceMessage {
                             stream: format!("{}@depth", depth_update.symbol.to_lowercase()),
                             data: serde_json::json!(depth_update),
                         })
                     }
-                    Err(e) => {
-                        debug!("Not a depth update message: {}", e);
-                        // Try to parse as trade message
-                        match serde_json::from_str::<TradeMessage>(&text) {
-                            Ok(trade_msg) => {
-                                debug!(
-                                    "Received trade message: symbol={}, price={}, quantity={}",
-                                    trade_msg.symbol, trade_msg.price, trade_msg.quantity
-                                );
-                                // Create a BinanceMessage for trade events
-                                Ok(BinanceMessage {
-                                    stream: format!("{}@trade", trade_msg.symbol.to_lowercase()),
-                                    data: serde_json::json!(trade_msg),
-                                })
-                            }
-                            Err(e) => {
-                                debug!("Not a trade message: {}", e);
-                                // Try to parse as response message
-                                match serde_json::from_str::<BinanceResponse>(&text) {
-                                    Ok(response) => {
-                                        debug!("Received response: {:?}", response);
-                                        if response.error.is_some() {
-                                            return Err(WebSocketError::SubscriptionError(
-                                                format!("Subscription error: {:?}", response.error),
-                                            ));
-                                        }
-                                        // Create a generic BinanceMessage for responses
-                                        Ok(BinanceMessage {
-                                            stream: "response".to_string(),
-                                            data: serde_json::json!({ "result": response.result }),
-                                        })
-                                    }
-                                    Err(e) => {
-                                        debug!("Not a response message: {}", e);
-                                        // Try to parse as generic Binance message last
-                                        match serde_json::from_str::<BinanceMessage>(&text) {
-                                            Ok(binance_msg) => {
-                                                debug!(
-                                                    "Received generic Binance message: stream={}",
-                                                    binance_msg.stream
-                                                );
-                                                Ok(binance_msg)
-                                            }
-                                            Err(e) => {
-                                                warn!("Failed to parse message: {} - {}", text, e);
-                                                Err(WebSocketError::ParseError(format!(
-                                                    "Failed to parse message: {} - {}",
-                                                    text, e
-                                                )))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    Some(BinanceEventType::Trade) => {
+                        let trade_msg: TradeMessage =
+                            serde_json::from_value(value).map_err(|e| {
+                                WebSocketError::ParseError(format!(
+                                    "Failed to parse trade message: {}",
+                                    e
+                                ))
+                            })?;
+
+                        debug!(
+                            "Received trade message: symbol={}, price={}, quantity={}",
+                            trade_msg.symbol, trade_msg.price, trade_msg.quantity
+                        );
+
+                        Ok(BinanceMessage {
+                            stream: format!("{}@trade", trade_msg.symbol.to_lowercase()),
+                            data: serde_json::json!(trade_msg),
+                        })
+                    }
+                    Some(BinanceEventType::Ticker24hr) => {
+                        let ticker: Ticker24hr = serde_json::from_value(value).map_err(|e| {
+                            WebSocketError::ParseError(format!("Failed to parse ticker: {}", e))
+                        })?;
+
+                        debug!(
+                            "Received 24hr ticker: symbol={}, last_price={}",
+                            ticker.symbol, ticker.last_price
+                        );
+
+                        Ok(BinanceMessage {
+                            stream: format!("{}@ticker", ticker.symbol.to_lowercase()),
+                            data: serde_json::json!(ticker),
+                        })
+                    }
+                    Some(BinanceEventType::Kline) => {
+                        // Kline messages are not yet fully supported
+                        debug!("Received kline message (not fully supported)");
+                        Ok(BinanceMessage {
+                            stream: "kline".to_string(),
+                            data: value,
+                        })
+                    }
+                    Some(BinanceEventType::AggregatedTrade) => {
+                        // Aggregated trade messages are not yet fully supported
+                        debug!("Received aggregated trade message (not fully supported)");
+                        Ok(BinanceMessage {
+                            stream: "aggTrade".to_string(),
+                            data: value,
+                        })
+                    }
+                    None => {
+                        // Fallback to other message types
+                        Ok(BinanceMessage {
+                            stream: "unknown".to_string(),
+                            data: value,
+                        })
                     }
                 }
             }
@@ -317,7 +346,6 @@ impl BinanceWebSocket {
             }
             Message::Ping(data) => {
                 debug!("Received ping, sending pong");
-                // We'll handle pong responses in the connection loop
                 Ok(BinanceMessage {
                     stream: "ping".to_string(),
                     data: serde_json::json!({ "data": data }),
@@ -449,6 +477,60 @@ mod tests {
             result.unwrap_err(),
             WebSocketError::ConnectionError(_)
         ));
+    }
+
+    #[test]
+    fn test_classify_message_depth_update() {
+        let json_data = serde_json::json!({
+            "e": "depthUpdate",
+            "s": "BTCUSDT",
+            "b": [],
+            "a": []
+        });
+        let result = BinanceWebSocket::classify_message(&json_data);
+        assert_eq!(result, Some(BinanceEventType::DepthUpdate));
+    }
+
+    #[test]
+    fn test_classify_message_trade() {
+        let json_data = serde_json::json!({
+            "e": "trade",
+            "s": "BTCUSDT",
+            "p": "50000.0"
+        });
+        let result = BinanceWebSocket::classify_message(&json_data);
+        assert_eq!(result, Some(BinanceEventType::Trade));
+    }
+
+    #[test]
+    fn test_classify_message_ticker_24hr() {
+        let json_data = serde_json::json!({
+            "e": "24hrTicker",
+            "s": "BTCUSDT",
+            "c": "50000.0"
+        });
+        let result = BinanceWebSocket::classify_message(&json_data);
+        assert_eq!(result, Some(BinanceEventType::Ticker24hr));
+    }
+
+    #[test]
+    fn test_classify_message_unknown() {
+        let json_data = serde_json::json!({
+            "e": "unknownEvent",
+            "s": "BTCUSDT"
+        });
+        let result = BinanceWebSocket::classify_message(&json_data);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_classify_message_no_event_type() {
+        let json_data = serde_json::json!({
+            "method": "SUBSCRIBE",
+            "params": ["btcusdt@depth"]
+        });
+        let result = BinanceWebSocket::classify_message(&json_data);
+        assert_eq!(result, None);
     }
 
     #[tokio::test]
