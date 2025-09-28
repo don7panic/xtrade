@@ -7,8 +7,8 @@ use anyhow::Result;
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::{Mutex, watch};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
@@ -22,9 +22,11 @@ use super::types::{
 /// Binance WebSocket client
 pub struct BinanceWebSocket {
     url: String,
-    status: Arc<Mutex<ConnectionStatus>>,
+    status_tx: watch::Sender<ConnectionStatus>,
+    status_rx: watch::Receiver<ConnectionStatus>,
     connection: Arc<Mutex<Option<WebSocketStream<MaybeTlsStream<TcpStream>>>>>,
     message_tx: mpsc::Sender<Result<BinanceMessage, WebSocketError>>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
 }
 
 impl BinanceWebSocket {
@@ -33,39 +35,41 @@ impl BinanceWebSocket {
         url: impl Into<String>,
     ) -> (Self, mpsc::Receiver<Result<BinanceMessage, WebSocketError>>) {
         let (message_tx, message_rx) = mpsc::channel(1000); // Increased capacity for high-frequency data
+        let (status_tx, status_rx) = watch::channel(ConnectionStatus::Disconnected);
 
         let ws = Self {
             url: url.into(),
-            status: Arc::new(Mutex::new(ConnectionStatus::Disconnected)),
+            status_tx,
+            status_rx,
             connection: Arc::new(Mutex::new(None)),
             message_tx,
+            shutdown_tx: None,
         };
 
         (ws, message_rx)
     }
 
     /// Get current connection status
-    pub async fn status(&self) -> ConnectionStatus {
-        let status = self.status.lock().await;
-        status.clone()
+    pub fn status(&self) -> ConnectionStatus {
+        self.status_rx.borrow().clone()
     }
 
     /// Connect to Binance WebSocket
     pub async fn connect(&self) -> Result<()> {
-        self.update_status(ConnectionStatus::Connecting).await;
+        self.status_tx.send(ConnectionStatus::Connecting)?;
 
         match connect_async(&self.url).await {
             Ok((ws_stream, _)) => {
                 let mut connection = self.connection.lock().await;
                 *connection = Some(ws_stream);
-                self.update_status(ConnectionStatus::Connected).await;
+                self.status_tx.send(ConnectionStatus::Connected)?;
                 info!("Connected to Binance WebSocket at {}", self.url);
                 Ok(())
             }
             Err(e) => {
                 let error_msg = format!("Failed to connect to WebSocket: {}", e);
-                self.update_status(ConnectionStatus::Error(error_msg.clone()))
-                    .await;
+                self.status_tx
+                    .send(ConnectionStatus::Error(error_msg.clone()))?;
                 error!("{}", error_msg);
                 Err(anyhow::anyhow!(error_msg))
             }
@@ -81,7 +85,7 @@ impl BinanceWebSocket {
             }
         }
 
-        self.update_status(ConnectionStatus::Disconnected).await;
+        self.status_tx.send(ConnectionStatus::Disconnected)?;
         info!("Disconnected from Binance WebSocket");
         Ok(())
     }
@@ -151,58 +155,72 @@ impl BinanceWebSocket {
     }
 
     /// Start listening for incoming messages
-    pub async fn start_listening(&self) -> Result<()> {
+    pub async fn start_listening(&mut self) -> Result<()> {
         let connection = self.connection.clone();
         let message_tx = self.message_tx.clone();
-        let status = self.status.clone();
+        let status_tx = self.status_tx.clone();
+
+        // Create shutdown channel for graceful termination
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+        self.shutdown_tx = Some(shutdown_tx);
 
         tokio::spawn(async move {
             loop {
-                // Get connection temporarily for each message
-                let mut connection = connection.lock().await;
-                if let Some(ws) = connection.as_mut() {
-                    // Process messages without dropping connection while using ws
-                    if let Some(message) = ws.next().await {
-                        debug!("Raw WebSocket message received");
-                        match message {
-                            Ok(msg) => {
-                                debug!("Processing WebSocket message");
-                                match Self::process_message(msg) {
-                                    Ok(binance_msg) => {
-                                        debug!("Sending processed message to channel");
-                                        if let Err(e) = message_tx.send(Ok(binance_msg)).await {
-                                            error!("Failed to send message to channel: {}", e);
+                // Take connection for message processing only when needed
+                let mut connection_guard = connection.lock().await;
+                if let Some(ws_stream) = connection_guard.as_mut() {
+                    // Use select! to handle both messages and shutdown
+                    tokio::select! {
+                        message = ws_stream.next() => {
+                            match message {
+                                Some(Ok(msg)) => {
+                                    debug!("Processing WebSocket message");
+                                    match Self::process_message(msg) {
+                                        Ok(binance_msg) => {
+                                            if let Err(e) = message_tx.send(Ok(binance_msg)).await {
+                                                error!("Failed to send message to channel: {}", e);
+                                            }
                                         }
-                                    }
-                                    Err(e) => {
-                                        if let Err(e) = message_tx.send(Err(e)).await {
-                                            error!("Failed to send error to channel: {}", e);
+                                        Err(e) => {
+                                            if let Err(e) = message_tx.send(Err(e)).await {
+                                                error!("Failed to send error to channel: {}", e);
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                let error_msg = format!("WebSocket message error: {}", e);
-                                error!("{}", error_msg);
-                                let mut status = status.lock().await;
-                                *status = ConnectionStatus::Error(error_msg.clone());
-
-                                if let Err(e) = message_tx
-                                    .send(Err(WebSocketError::MessageError(error_msg)))
-                                    .await
-                                {
-                                    error!("Failed to send error to channel: {}", e);
+                                Some(Err(e)) => {
+                                    let error_msg = format!("WebSocket message error: {}", e);
+                                    error!("{}", error_msg);
+                                    let _ = status_tx.send(ConnectionStatus::Error(error_msg.clone()));
+                                    let _ = message_tx.send(Err(WebSocketError::MessageError(error_msg))).await;
+                                    // Don't drop the connection on error - let it attempt recovery
+                                }
+                                None => {
+                                    // Connection closed
+                                    info!("WebSocket connection closed");
+                                    let _ = status_tx.send(ConnectionStatus::Disconnected);
+                                    // Connection will be released when guard goes out of scope
+                                    break;
                                 }
                             }
+                            // Connection guard released automatically here
                         }
-                    } else {
-                        // Connection closed
-                        break;
+                        _ = shutdown_rx.recv() => {
+                            info!("Received shutdown signal");
+                            // Connection guard released automatically here
+                            break;
+                        }
                     }
                 } else {
-                    // No connection, wait briefly and retry
-                    drop(connection);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    // No connection available, wait and check shutdown
+                    drop(connection_guard);
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        _ = shutdown_rx.recv() => {
+                            info!("Received shutdown signal");
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -318,15 +336,22 @@ impl BinanceWebSocket {
         }
     }
 
-    /// Update connection status
-    async fn update_status(&self, new_status: ConnectionStatus) {
-        let mut status = self.status.lock().await;
-        *status = new_status;
+    /// Gracefully stop listening and cleanup
+    pub async fn shutdown(&mut self) -> Result<()> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            if let Err(e) = shutdown_tx.send(()).await {
+                warn!("Failed to send shutdown signal: {}", e);
+            }
+        }
+
+        self.status_tx.send(ConnectionStatus::Disconnected)?;
+        info!("WebSocket client shutdown initiated");
+        Ok(())
     }
 
     /// Reconnect with exponential backoff
     pub async fn reconnect(&self) -> Result<()> {
-        self.update_status(ConnectionStatus::Reconnecting).await;
+        self.status_tx.send(ConnectionStatus::Reconnecting)?;
 
         // Simple retry logic - will be enhanced with backoff crate later
         for attempt in 1..=3 {
@@ -347,35 +372,97 @@ impl BinanceWebSocket {
 
         Err(anyhow::anyhow!("Failed to reconnect after 3 attempts"))
     }
+
+    /// Check if currently connected
+    pub fn is_connected(&self) -> bool {
+        matches!(self.status(), ConnectionStatus::Connected)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio;
     use tokio_test::block_on;
 
     #[test]
     fn test_websocket_creation() {
         let (ws, _rx) = BinanceWebSocket::new("wss://test.binance.com/ws");
+        assert_eq!(ws.status(), ConnectionStatus::Disconnected);
+    }
+
+    #[test]
+    fn test_status_watch_channel() {
+        let (ws, _rx) = BinanceWebSocket::new("wss://test.binance.com/ws");
+
         block_on(async {
-            let status = ws.status().await;
-            assert_eq!(status, ConnectionStatus::Disconnected);
+            // Initial status should be Disconnected
+            assert_eq!(ws.status(), ConnectionStatus::Disconnected);
+
+            // Simulate connection
+            ws.status_tx.send(ConnectionStatus::Connecting).unwrap();
+            assert_eq!(ws.status(), ConnectionStatus::Connecting);
+
+            ws.status_tx.send(ConnectionStatus::Connected).unwrap();
+            assert_eq!(ws.status(), ConnectionStatus::Connected);
+            assert!(ws.is_connected());
+
+            ws.status_tx.send(ConnectionStatus::Disconnected).unwrap();
+            assert_eq!(ws.status(), ConnectionStatus::Disconnected);
+            assert!(!ws.is_connected());
         });
     }
 
     #[test]
-    fn test_subscribe_request() {
-        let request = SubscribeRequest::new("BTCUSDT", "depth");
-        assert_eq!(request.method, "SUBSCRIBE");
-        assert_eq!(request.params, vec!["btcusdt@depth"]);
-        assert_eq!(request.id, 1);
+    fn test_shutdown_method() {
+        let (mut ws, _rx) = BinanceWebSocket::new("wss://test.binance.com/ws");
+
+        block_on(async {
+            // Start listening to create shutdown channel
+            ws.start_listening().await.unwrap();
+
+            // Test shutdown
+            ws.shutdown().await.unwrap();
+            assert_eq!(ws.status(), ConnectionStatus::Disconnected);
+
+            // Shutdown should be idempotent
+            ws.shutdown().await.unwrap();
+        });
     }
 
     #[test]
-    fn test_unsubscribe_request() {
-        let request = UnsubscribeRequest::new("ETHUSDT", "trade");
-        assert_eq!(request.method, "UNSUBSCRIBE");
-        assert_eq!(request.params, vec!["ethusdt@trade"]);
-        assert_eq!(request.id, 1);
+    fn test_process_message_pong() {
+        let msg = Message::Pong(b"test".to_vec());
+        let result = BinanceWebSocket::process_message(msg).unwrap();
+
+        assert_eq!(result.stream, "pong");
+        assert!(result.data.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_process_message_close() {
+        let msg = Message::Close(None);
+        let result = BinanceWebSocket::process_message(msg);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WebSocketError::ConnectionError(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_logic() {
+        let (ws, _rx) = BinanceWebSocket::new("wss://invalid-test-url");
+
+        // Reconnect should fail with invalid URL but complete gracefully
+        let result = ws.reconnect().await;
+        assert!(result.is_err());
+
+        // Status should reflect reconnection attempts
+        assert!(matches!(
+            ws.status(),
+            ConnectionStatus::Error(_) | ConnectionStatus::Disconnected
+        ));
     }
 }

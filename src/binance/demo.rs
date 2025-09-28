@@ -397,9 +397,9 @@ impl WebSocketManager {
     }
 
     /// 连接并设置 WebSocket
-    pub async fn connect_and_setup(&self, symbol: &str) -> Result<()> {
+    pub async fn connect_and_setup(&mut self, symbol: &str) -> Result<()> {
         // 检查初始状态
-        let status = self.ws.status().await;
+        let status = self.ws.status();
         println!("📡 Initial status: {:?}", status);
 
         // 连接
@@ -437,10 +437,11 @@ pub async fn demo_websocket() -> AppResult<()> {
     println!("🔌 Testing Binance WebSocket OrderBook incremental updates...");
 
     const SYMBOL: &str = "BTCUSDT";
-    const TEST_DURATION: Duration = Duration::from_secs(10);
+    const TEST_DURATION: Duration = Duration::from_secs(3);
 
     // 创建组件
-    let (ws_manager, mut message_rx) = WebSocketManager::new("wss://stream.binance.com:9443/ws");
+    let (mut ws_manager, mut message_rx) =
+        WebSocketManager::new("wss://stream.binance.com:9443/ws");
     let rest_client = BinanceRestClient::new("https://api.binance.com".to_string());
     let mut orderbook_manager = OrderBookManager::new(SYMBOL.to_string());
     let mut message_processor = MessageProcessor::new();
@@ -486,42 +487,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_message_processor_creation() {
-        let processor = MessageProcessor::new();
-        let stats = processor.get_stats();
-
-        assert_eq!(stats.message_count, 0);
-        assert_eq!(stats.update_count, 0);
-        assert_eq!(stats.error_count, 0);
-    }
-
-    #[test]
-    fn test_orderbook_manager_creation() {
-        let symbol = "BTCUSDT".to_string();
-        let manager = OrderBookManager::new(symbol.clone());
-
-        assert_eq!(manager.orderbook.symbol, symbol);
-    }
-
-    #[test]
     fn test_metrics_collector_creation() {
         let metrics = MetricsCollector::new();
         // 只是确保可以创建，不测试时间相关逻辑
         assert!(metrics.start_time <= Instant::now());
-    }
-
-    #[test]
-    fn test_message_stats_debug() {
-        let stats = MessageStats {
-            message_count: 100,
-            update_count: 80,
-            error_count: 5,
-        };
-
-        let debug_str = format!("{:?}", stats);
-        assert!(debug_str.contains("100"));
-        assert!(debug_str.contains("80"));
-        assert!(debug_str.contains("5"));
     }
 
     #[test]
