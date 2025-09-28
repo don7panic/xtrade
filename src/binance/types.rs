@@ -421,7 +421,7 @@ pub struct TradeMessage {
 }
 
 /// 24hr ticker message from Binance
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Ticker24hr {
     #[serde(rename = "e")]
     pub event_type: String,
@@ -558,6 +558,21 @@ pub enum ErrorSeverity {
     Warning,  // Should be logged but processing can continue
     Error,    // Requires action but system can recover
     Critical, // Requires immediate resync/restart
+}
+
+/// Binance WebSocket event types
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone)]
+pub enum BinanceEventType {
+    #[serde(rename = "depthUpdate")]
+    DepthUpdate,
+    #[serde(rename = "trade")]
+    Trade,
+    #[serde(rename = "24hrTicker")]
+    Ticker24hr,
+    #[serde(rename = "kline")]
+    Kline,
+    #[serde(rename = "aggTrade")]
+    AggregatedTrade,
 }
 
 // Additional types will be added in subsequent days

@@ -437,7 +437,7 @@ pub async fn demo_websocket() -> AppResult<()> {
     println!("🔌 Testing Binance WebSocket OrderBook incremental updates...");
 
     const SYMBOL: &str = "BTCUSDT";
-    const TEST_DURATION: Duration = Duration::from_secs(3);
+    const TEST_DURATION: Duration = Duration::from_secs(5);
 
     // 创建组件
     let (mut ws_manager, mut message_rx) =
