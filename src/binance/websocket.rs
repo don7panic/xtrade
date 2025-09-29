@@ -15,8 +15,8 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use super::types::{
-    BinanceEventType, BinanceMessage, BinanceResponse, ConnectionStatus, OrderBookUpdate,
-    SubscribeRequest, Ticker24hr, TradeMessage, UnsubscribeRequest, WebSocketError,
+    BinanceEventType, BinanceMessage, ConnectionStatus, OrderBookUpdate, SubscribeRequest,
+    Ticker24hr, TradeMessage, UnsubscribeRequest, WebSocketError,
 };
 
 /// Binance WebSocket client

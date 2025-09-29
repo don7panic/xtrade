@@ -33,8 +33,39 @@ use std::time::{Duration, Instant};
 
 use super::BinanceWebSocket;
 use super::rest::BinanceRestClient;
-use super::types::{BinanceMessage, OrderBook, OrderBookError, OrderBookUpdate};
+use super::types::{BinanceMessage, OrderBook, OrderBookError, OrderBookUpdate, TradeMessage};
 use crate::AppResult;
+
+/// 消息类型分类枚举
+///
+/// 用于根据消息流标识符对消息进行分类，
+/// 避免使用嵌套的 if 判断。
+#[derive(Debug, PartialEq)]
+pub enum MessageType {
+    /// 深度更新消息
+    DepthUpdate,
+    /// 交易消息
+    Trade,
+    /// 24小时行情消息
+    Ticker24hr,
+    /// 其他消息类型
+    Other,
+}
+
+impl MessageType {
+    /// 根据消息流标识符判断消息类型
+    pub fn from_stream(stream: &str) -> Self {
+        if stream.contains("@depth") {
+            Self::DepthUpdate
+        } else if stream.contains("@trade") {
+            Self::Trade
+        } else if stream.contains("@ticker") {
+            Self::Ticker24hr
+        } else {
+            Self::Other
+        }
+    }
+}
 
 /// WebSocket 消息处理器
 ///
@@ -59,8 +90,14 @@ pub struct MessageProcessor {
     message_count: u64,
     /// 成功处理的深度更新数量
     update_count: u64,
+    /// 成功处理的交易消息数量
+    trade_count: u64,
     /// 遇到的错误总数
     error_count: u64,
+    /// 累计交易量
+    trade_volume: f64,
+    /// 最后交易价格
+    last_trade_price: Option<f64>,
 }
 
 impl MessageProcessor {
@@ -69,7 +106,10 @@ impl MessageProcessor {
         Self {
             message_count: 0,
             update_count: 0,
+            trade_count: 0,
             error_count: 0,
+            trade_volume: 0.0,
+            last_trade_price: None,
         }
     }
 
@@ -110,26 +150,50 @@ impl MessageProcessor {
             error
         })?;
 
-        // 早期返回非深度消息
-        if !message.stream.contains("@depth") {
-            if self.message_count <= 3 {
-                println!("📨 Non-depth message: {}", message.stream);
-            }
-            return Ok(true);
-        }
-
-        // 解析深度更新数据并处理
-        match serde_json::from_value::<OrderBookUpdate>(message.data) {
-            Ok(depth_update) => {
-                self.handle_depth_update(depth_update, orderbook, rest_client)
-                    .await
-            }
-            Err(e) => {
-                if self.error_count <= 3 {
-                    println!("❌ Failed to parse depth update: {}", e);
+        // 根据消息类型进行不同的处理
+        match MessageType::from_stream(&message.stream) {
+            MessageType::DepthUpdate => {
+                // 处理深度更新消息
+                match serde_json::from_value::<OrderBookUpdate>(message.data) {
+                    Ok(depth_update) => {
+                        self.handle_depth_update(depth_update, orderbook, rest_client)
+                            .await
+                    }
+                    Err(e) => {
+                        if self.error_count <= 3 {
+                            println!("❌ Failed to parse depth update: {}", e);
+                        }
+                        self.error_count += 1;
+                        Ok(true) // 解析错误时继续处理
+                    }
                 }
-                self.error_count += 1;
-                Ok(true) // 解析错误时继续处理
+            }
+            MessageType::Trade => {
+                // 处理交易消息
+                match serde_json::from_value::<TradeMessage>(message.data) {
+                    Ok(trade_msg) => self.handle_trade_message(trade_msg).await,
+                    Err(e) => {
+                        if self.error_count <= 3 {
+                            println!("❌ Failed to parse trade message: {}", e);
+                        }
+                        self.error_count += 1;
+                        Ok(true) // 解析错误时继续处理
+                    }
+                }
+            }
+            MessageType::Ticker24hr => {
+                // 处理 ticker 消息
+                if self.message_count <= 3 {
+                    println!("📊 Ticker message: {}", message.stream);
+                }
+                Ok(true)
+            }
+            MessageType::Other => {
+                // 处理其他消息
+                if self.message_count <= 3 {
+                    println!("📨 Other message: {}", message.stream);
+                }
+                Ok(true)
             }
         }
     }
@@ -151,6 +215,28 @@ impl MessageProcessor {
             }
             Err(e) => self.handle_orderbook_error(e, orderbook, rest_client).await,
         }
+    }
+
+    /// 处理交易消息
+    async fn handle_trade_message(&mut self, trade_msg: TradeMessage) -> Result<bool> {
+        self.trade_count += 1;
+
+        // 解析价格和数量
+        let price = trade_msg.price.parse::<f64>().unwrap_or(0.0);
+        let quantity = trade_msg.quantity.parse::<f64>().unwrap_or(0.0);
+
+        self.last_trade_price = Some(price);
+        self.trade_volume += quantity;
+
+        // 选择性日志记录
+        if self.trade_count <= 5 || self.trade_count % 10 == 0 {
+            println!(
+                "💰 Trade #{}: {} {} @ {}, maker: {}",
+                self.trade_count, trade_msg.symbol, quantity, price, trade_msg.is_buyer_maker
+            );
+        }
+
+        Ok(true)
     }
 
     /// 记录成功的更新
@@ -237,7 +323,10 @@ impl MessageProcessor {
         MessageStats {
             message_count: self.message_count,
             update_count: self.update_count,
+            trade_count: self.trade_count,
             error_count: self.error_count,
+            total_trade_volume: self.trade_volume,
+            last_trade_price: self.last_trade_price,
         }
     }
 }
@@ -251,8 +340,14 @@ pub struct MessageStats {
     pub message_count: u64,
     /// 成功处理的深度更新数量
     pub update_count: u64,
+    /// 成功处理的交易消息数量
+    pub trade_count: u64,
     /// 遇到的错误总数
     pub error_count: u64,
+    /// 累计交易量
+    pub total_trade_volume: f64,
+    /// 最后交易价格
+    pub last_trade_price: Option<f64>,
 }
 
 /// 订单簿管理器
@@ -410,6 +505,10 @@ impl WebSocketManager {
         self.ws.start_listening().await?;
         println!("👂 Started listening for messages...");
 
+        // 订阅交易流
+        println!("📈 Subscribing to {} trade stream...", symbol);
+        self.ws.subscribe_trade(symbol).await?;
+
         // 订阅深度流
         println!(
             "📈 Subscribing to {} depth stream (100ms updates)...",
@@ -422,6 +521,11 @@ impl WebSocketManager {
 
     /// 清理和断开连接
     pub async fn cleanup(&self, symbol: &str) -> Result<()> {
+        // 取消订阅交易流
+        self.ws.unsubscribe(symbol, "trade").await?;
+        println!("📉 Unsubscribed from {} trade stream", symbol);
+
+        // 取消订阅深度流
         self.ws.unsubscribe(symbol, "depth@100ms").await?;
         println!("📉 Unsubscribed from {} depth stream", symbol);
 
@@ -498,13 +602,19 @@ mod tests {
         let stats = MessageStats {
             message_count: 42,
             update_count: 38,
+            trade_count: 15,
             error_count: 4,
+            total_trade_volume: 123.45,
+            last_trade_price: Some(50000.0),
         };
 
         let cloned = stats.clone();
         assert_eq!(stats.message_count, cloned.message_count);
         assert_eq!(stats.update_count, cloned.update_count);
+        assert_eq!(stats.trade_count, cloned.trade_count);
         assert_eq!(stats.error_count, cloned.error_count);
+        assert_eq!(stats.total_trade_volume, cloned.total_trade_volume);
+        assert_eq!(stats.last_trade_price, cloned.last_trade_price);
     }
 
     // 集成测试的示例 - 测试组件如何协同工作
