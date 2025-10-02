@@ -3,6 +3,7 @@
 //! Provides performance metrics, latency measurement, and connection monitoring.
 
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::VecDeque;
 
 /// Connection status enumeration
 #[derive(Debug, Clone, PartialEq)]
@@ -11,6 +12,17 @@ pub enum ConnectionStatus {
     Connecting,
     Connected,
     Reconnecting,
+    Error(String),
+}
+
+/// Connection quality levels
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionQualityLevel {
+    Excellent,  // < 100ms latency, > 1000 msgs/sec
+    Good,       // < 500ms latency, > 500 msgs/sec
+    Fair,       // < 1000ms latency, > 100 msgs/sec
+    Poor,       // > 1000ms latency, < 100 msgs/sec
+    Critical,   // No messages for > 30 seconds
 }
 
 /// Connection metrics structure
@@ -23,6 +35,10 @@ pub struct ConnectionMetrics {
     pub reconnect_count: u32,
     pub last_message_time: u64,
     pub messages_per_second: f64,
+    pub connection_quality: ConnectionQualityLevel,
+    pub uptime_seconds: u64,
+    pub total_messages: u64,
+    pub error_count: u32,
 }
 
 impl Default for ConnectionMetrics {
@@ -35,6 +51,10 @@ impl Default for ConnectionMetrics {
             reconnect_count: 0,
             last_message_time: 0,
             messages_per_second: 0.0,
+            connection_quality: ConnectionQualityLevel::Poor,
+            uptime_seconds: 0,
+            total_messages: 0,
+            error_count: 0,
         }
     }
 }
@@ -45,6 +65,10 @@ pub struct MetricsCollector {
     message_count: u64,
     last_reset: SystemTime,
     max_samples: usize,
+    connection_start_time: SystemTime,
+    error_count: u32,
+    reconnect_count: u32,
+    message_history: VecDeque<u64>, // Timestamps of last 1000 messages
 }
 
 impl MetricsCollector {
@@ -55,7 +79,22 @@ impl MetricsCollector {
             message_count: 0,
             last_reset: SystemTime::now(),
             max_samples,
+            connection_start_time: SystemTime::now(),
+            error_count: 0,
+            reconnect_count: 0,
+            message_history: VecDeque::with_capacity(1000),
         }
+    }
+
+    /// Record connection start time
+    pub fn record_connection_start(&mut self) {
+        self.connection_start_time = SystemTime::now();
+        self.reconnect_count += 1;
+    }
+
+    /// Record an error occurrence
+    pub fn record_error(&mut self) {
+        self.error_count += 1;
     }
 
     /// Record message latency
@@ -72,6 +111,12 @@ impl MetricsCollector {
         }
         self.latency_samples.push(latency);
         self.message_count += 1;
+
+        // Record message timestamp for rate calculation
+        if self.message_history.len() >= 1000 {
+            self.message_history.pop_front();
+        }
+        self.message_history.push_back(now);
 
         // Record metrics (placeholder for actual metrics implementation)
         // metrics::histogram!("message_latency_ms").record(latency as f64);
@@ -112,7 +157,74 @@ impl MetricsCollector {
     pub fn reset(&mut self) {
         self.latency_samples.clear();
         self.message_count = 0;
+        self.message_history.clear();
         self.last_reset = SystemTime::now();
+    }
+
+    /// Calculate connection quality based on recent performance
+    pub fn calculate_connection_quality(&self) -> ConnectionQualityLevel {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // Check if we have recent messages
+        let last_message_time = self.message_history.back().copied().unwrap_or(0);
+        let time_since_last_message = now.saturating_sub(last_message_time);
+        
+        // If no messages for 30 seconds, connection is critical
+        if time_since_last_message > 30_000 {
+            return ConnectionQualityLevel::Critical;
+        }
+        
+        // Calculate recent message rate (last minute)
+        let minute_ago = now.saturating_sub(60_000);
+        let recent_message_count = self.message_history
+            .iter()
+            .filter(|&&t| t >= minute_ago)
+            .count();
+        let recent_rate = recent_message_count as f64 / 60.0; // messages per second
+        
+        // Calculate average latency
+        let (p50, _p95, _p99) = self.calculate_percentiles();
+        let avg_latency = p50; // Use p50 as representative latency
+        
+        // Determine quality based on latency and message rate
+        if avg_latency < 100 && recent_rate > 1000.0 {
+            ConnectionQualityLevel::Excellent
+        } else if avg_latency < 500 && recent_rate > 500.0 {
+            ConnectionQualityLevel::Good
+        } else if avg_latency < 1000 && recent_rate > 100.0 {
+            ConnectionQualityLevel::Fair
+        } else {
+            ConnectionQualityLevel::Poor
+        }
+    }
+
+    /// Get comprehensive connection metrics
+    pub fn get_connection_metrics(&self, status: ConnectionStatus) -> ConnectionMetrics {
+        let (p50, p95, p99) = self.calculate_percentiles();
+        let uptime = self.connection_start_time.elapsed().unwrap_or_default().as_secs();
+        
+        ConnectionMetrics {
+            status,
+            latency_p50: p50,
+            latency_p95: p95,
+            latency_p99: p99,
+            reconnect_count: self.reconnect_count,
+            last_message_time: self.message_history.back().copied().unwrap_or(0),
+            messages_per_second: self.messages_per_second(),
+            connection_quality: self.calculate_connection_quality(),
+            uptime_seconds: uptime,
+            total_messages: self.message_count,
+            error_count: self.error_count,
+        }
+    }
+
+    /// Check if connection quality is acceptable
+    pub fn is_connection_acceptable(&self) -> bool {
+        let quality = self.calculate_connection_quality();
+        matches!(quality, ConnectionQualityLevel::Excellent | ConnectionQualityLevel::Good | ConnectionQualityLevel::Fair)
     }
 }
 

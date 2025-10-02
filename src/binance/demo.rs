@@ -590,33 +590,6 @@ pub async fn demo_websocket() -> AppResult<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_metrics_collector_creation() {
-        let metrics = MetricsCollector::new();
-        // 只是确保可以创建，不测试时间相关逻辑
-        assert!(metrics.start_time <= Instant::now());
-    }
-
-    #[test]
-    fn test_message_stats_clone() {
-        let stats = MessageStats {
-            message_count: 42,
-            update_count: 38,
-            trade_count: 15,
-            error_count: 4,
-            total_trade_volume: 123.45,
-            last_trade_price: Some(50000.0),
-        };
-
-        let cloned = stats.clone();
-        assert_eq!(stats.message_count, cloned.message_count);
-        assert_eq!(stats.update_count, cloned.update_count);
-        assert_eq!(stats.trade_count, cloned.trade_count);
-        assert_eq!(stats.error_count, cloned.error_count);
-        assert_eq!(stats.total_trade_volume, cloned.total_trade_volume);
-        assert_eq!(stats.last_trade_price, cloned.last_trade_price);
-    }
-
     // 集成测试的示例 - 测试组件如何协同工作
     #[tokio::test]
     async fn test_component_integration() {

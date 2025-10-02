@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 metrics = "0.21"
 
 # 重连策略
-backoff = "0.4"
+backoff = { version = "0.4", features = ["futures", "tokio"] }
 
 # 终端颜色输出
 colored = "2.0"
