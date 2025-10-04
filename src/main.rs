@@ -20,7 +20,9 @@ async fn main() -> AppResult<()> {
     // Handle commands
     match cli.command {
         Commands::Subscribe { symbols } => handle_subscribe(symbols, market_manager.clone()).await,
-        Commands::Unsubscribe { symbols } => handle_unsubscribe(symbols, market_manager.clone()).await,
+        Commands::Unsubscribe { symbols } => {
+            handle_unsubscribe(symbols, market_manager.clone()).await
+        }
         Commands::List => handle_list(market_manager.clone()).await,
         Commands::Ui { simple } => handle_ui(simple).await,
         Commands::Status => handle_status(market_manager.clone()).await,
@@ -30,11 +32,14 @@ async fn main() -> AppResult<()> {
     }
 }
 
-async fn handle_subscribe(symbols: Vec<String>, market_manager: Arc<Mutex<MarketDataManager>>) -> AppResult<()> {
+async fn handle_subscribe(
+    symbols: Vec<String>,
+    market_manager: Arc<Mutex<MarketDataManager>>,
+) -> AppResult<()> {
     tracing::info!("Subscribing to symbols: {:?}", symbols);
 
     let mut manager = market_manager.lock().await;
-    
+
     for symbol in symbols {
         match manager.subscribe(symbol.clone()).await {
             Ok(()) => {
@@ -49,11 +54,14 @@ async fn handle_subscribe(symbols: Vec<String>, market_manager: Arc<Mutex<Market
     Ok(())
 }
 
-async fn handle_unsubscribe(symbols: Vec<String>, market_manager: Arc<Mutex<MarketDataManager>>) -> AppResult<()> {
+async fn handle_unsubscribe(
+    symbols: Vec<String>,
+    market_manager: Arc<Mutex<MarketDataManager>>,
+) -> AppResult<()> {
     tracing::info!("Unsubscribing from symbols: {:?}", symbols);
 
     let mut manager = market_manager.lock().await;
-    
+
     for symbol in symbols {
         match manager.unsubscribe(&symbol).await {
             Ok(()) => {
@@ -72,8 +80,8 @@ async fn handle_list(market_manager: Arc<Mutex<MarketDataManager>>) -> AppResult
     tracing::info!("Listing subscribed symbols");
 
     let manager = market_manager.lock().await;
-    let symbols = manager.list_subscriptions();
-    
+    let symbols = manager.list_subscriptions().await;
+
     println!("📋 Currently subscribed symbols:");
     if symbols.is_empty() {
         println!("   (No active subscriptions)");
@@ -107,8 +115,8 @@ async fn handle_status(market_manager: Arc<Mutex<MarketDataManager>>) -> AppResu
     tracing::info!("Showing status information");
 
     let manager = market_manager.lock().await;
-    let symbols = manager.list_subscriptions();
-    
+    let symbols = manager.list_subscriptions().await;
+
     println!("🔍 XTrade Status:");
     println!("   Version: {}", env!("CARGO_PKG_VERSION"));
     println!("   Status: Running");
@@ -118,13 +126,16 @@ async fn handle_status(market_manager: Arc<Mutex<MarketDataManager>>) -> AppResu
     Ok(())
 }
 
-async fn handle_show(symbol: String, market_manager: Arc<Mutex<MarketDataManager>>) -> AppResult<()> {
+async fn handle_show(
+    symbol: String,
+    market_manager: Arc<Mutex<MarketDataManager>>,
+) -> AppResult<()> {
     tracing::info!("Showing details for symbol: {}", symbol);
 
     let manager = market_manager.lock().await;
-    
+
     println!("📊 Showing details for: {}", symbol);
-    
+
     if let Some(orderbook) = manager.get_orderbook(&symbol).await {
         println!("   Best bid: {:?}", orderbook.best_bid());
         println!("   Best ask: {:?}", orderbook.best_ask());
@@ -133,7 +144,10 @@ async fn handle_show(symbol: String, market_manager: Arc<Mutex<MarketDataManager
         println!("   Ask levels: {}", orderbook.asks.len());
     } else {
         println!("   (Not subscribed to this symbol)");
-        println!("   Use 'xtrade subscribe {}' to start tracking this symbol", symbol);
+        println!(
+            "   Use 'xtrade subscribe {}' to start tracking this symbol",
+            symbol
+        );
     }
 
     Ok(())
