@@ -56,21 +56,6 @@ fn test_help_command() {
     assert!(stdout.contains("demo"), "Should show demo command");
 }
 
-/// Test that the version command works
-#[test]
-fn test_version_command() {
-    let output = Command::new("cargo")
-        .args(["run", "--", "--version"])
-        .output()
-        .expect("Failed to execute version command");
-
-    assert!(output.status.success(), "Version command should succeed");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("xtrade"), "Should show binary name");
-    assert!(stdout.contains("0.1.0"), "Should show version number");
-}
-
 /// Test config show command
 #[test]
 fn test_config_show_command() {

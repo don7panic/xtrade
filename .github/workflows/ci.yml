@@ -84,10 +84,10 @@ jobs:
 
       - name: Verify binary works
         run: |
-          if [ "${{ matrix.os }}" != "windows-latest" ]; then
-            ./target/release/xtrade --version
-          else
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
             .\target\release\xtrade.exe --version
+          else
+            ./target/release/xtrade --version
           fi
 
   security-audit:

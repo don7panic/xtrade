@@ -20,9 +20,10 @@
 //!
 //! ```rust,no_run
 //! use xtrade::binance::demo::demo_websocket;
+//! use xtrade::AppResult;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! async fn main() -> AppResult<()> {
 //!     demo_websocket().await?;
 //!     Ok(())
 //! }
@@ -418,8 +419,19 @@ impl OrderBookManager {
 /// # 使用模式
 ///
 /// ```rust,no_run
+/// use xtrade::binance::demo::{MetricsCollector, MessageStats};
+/// use xtrade::binance::types::OrderBook;
+///
 /// let metrics = MetricsCollector::new();
-/// // ... 执行业务逻辑 ...
+/// let stats = MessageStats {
+///     message_count: 100,
+///     update_count: 50,
+///     trade_count: 25,
+///     error_count: 0,
+///     total_trade_volume: 1000.0,
+///     last_trade_price: Some(50000.0),
+/// };
+/// let orderbook = OrderBook::new("BTCUSDT".to_string());
 /// metrics.print_summary(&stats, &orderbook);
 /// ```
 pub struct MetricsCollector {
