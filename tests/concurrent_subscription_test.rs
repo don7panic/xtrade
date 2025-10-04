@@ -148,7 +148,7 @@ async fn test_concurrent_subscription_limit() -> Result<()> {
     // Try to subscribe to more than the limit
     let symbols: Vec<String> = (0..15).map(|i| format!("SYMBOL{}", i)).collect();
 
-    let mut manager = manager.lock().await;
+    let manager = manager.lock().await;
 
     for (i, symbol) in symbols.iter().enumerate() {
         let result = manager.subscribe(symbol.to_string()).await;

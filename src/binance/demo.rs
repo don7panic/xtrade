@@ -12,8 +12,8 @@
 //! ## 架构组件
 //!
 //! - [`MessageProcessor`]: 处理 WebSocket 消息的核心逻辑
-//! - [`OrderBookManager`]: 管理订单簿的初始化和状态
-//! - [`MetricsCollector`]: 收集和展示性能指标
+//! - [`OrderBookManager`][]: 管理订单簿的初始化和状态
+//! - [`MetricsCollector`][]: 收集和展示性能指标
 //! - [`WebSocketManager`]: 管理 WebSocket 连接的生命周期
 //!
 //! ## 使用示例
@@ -98,6 +98,12 @@ pub struct MessageProcessor {
     trade_volume: f64,
     /// 最后交易价格
     last_trade_price: Option<f64>,
+}
+
+impl Default for MessageProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MessageProcessor {
@@ -419,6 +425,12 @@ impl OrderBookManager {
 pub struct MetricsCollector {
     /// 开始计时的时间点
     start_time: Instant,
+}
+
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MetricsCollector {

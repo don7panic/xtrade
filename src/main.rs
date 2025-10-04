@@ -38,7 +38,7 @@ async fn handle_subscribe(
 ) -> AppResult<()> {
     tracing::info!("Subscribing to symbols: {:?}", symbols);
 
-    let mut manager = market_manager.lock().await;
+    let manager = market_manager.lock().await;
 
     for symbol in symbols {
         match manager.subscribe(symbol.clone()).await {
@@ -60,7 +60,7 @@ async fn handle_unsubscribe(
 ) -> AppResult<()> {
     tracing::info!("Unsubscribing from symbols: {:?}", symbols);
 
-    let mut manager = market_manager.lock().await;
+    let manager = market_manager.lock().await;
 
     for symbol in symbols {
         match manager.unsubscribe(&symbol).await {

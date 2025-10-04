@@ -24,6 +24,7 @@ pub enum SubscriptionStatus {
 
 /// Extended subscription information
 #[derive(Debug)]
+#[allow(dead_code)]
 struct SubscriptionInfo {
     pub orderbook: OrderBook,
     pub status: SubscriptionStatus,
@@ -71,7 +72,7 @@ pub struct SubscriptionHandle {
 /// Market data manager for handling multiple symbol subscriptions
 pub struct MarketDataManager {
     subscriptions: RwLock<HashMap<String, SubscriptionHandle>>,
-    rest_client: BinanceRestClient,
+    _rest_client: BinanceRestClient,
     event_tx: mpsc::UnboundedSender<MarketEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<MarketEvent>>,
 }
@@ -83,7 +84,7 @@ impl MarketDataManager {
 
         Self {
             subscriptions: RwLock::new(HashMap::new()),
-            rest_client: BinanceRestClient::new("https://api.binance.com".to_string()),
+            _rest_client: BinanceRestClient::new("https://api.binance.com".to_string()),
             event_tx,
             event_rx: Some(event_rx),
         }
@@ -228,6 +229,7 @@ impl MarketDataManager {
     }
 
     /// Process WebSocket message and update orderbook
+    #[allow(dead_code)]
     async fn process_websocket_message(
         orderbook: &mut OrderBook,
         symbol: &str,
@@ -314,7 +316,7 @@ impl MarketDataManager {
     }
 
     /// Get orderbook for a symbol
-    pub async fn get_orderbook(&self, symbol: &str) -> Option<OrderBook> {
+    pub async fn get_orderbook(&self, _symbol: &str) -> Option<OrderBook> {
         // This would need to be implemented with proper state management
         // For now, return None as we need to track orderbook state
         None
@@ -329,20 +331,20 @@ impl MarketDataManager {
     }
 
     /// Check if subscription needs recovery
-    pub async fn needs_recovery(&self, symbol: &str, max_stale_time_ms: u64) -> bool {
+    pub async fn needs_recovery(&self, _symbol: &str, _max_stale_time_ms: u64) -> bool {
         // Implementation would check last update time
         // For now, return false
         false
     }
 
     /// Handle reconnection event
-    pub async fn handle_reconnection(&mut self, max_stale_time_ms: u64) -> Result<()> {
+    pub async fn handle_reconnection(&mut self, _max_stale_time_ms: u64) -> Result<()> {
         info!("Handling reconnection event");
         Ok(())
     }
 
     /// Get connection quality metrics
-    pub async fn get_connection_quality(&self, symbol: &str) -> Option<ConnectionQuality> {
+    pub async fn get_connection_quality(&self, _symbol: &str) -> Option<ConnectionQuality> {
         // Implementation would calculate connection quality metrics
         // For now, return None
         None

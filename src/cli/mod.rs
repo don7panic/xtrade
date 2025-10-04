@@ -109,13 +109,13 @@ mod tests {
     #[test]
     fn test_cli_parsing() {
         // Test basic command parsing
-        let cli = Cli::try_parse_from(&["xtrade", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["xtrade", "list"]).unwrap();
         matches!(cli.command, Commands::List);
     }
 
     #[test]
     fn test_subscribe_command() {
-        let cli = Cli::try_parse_from(&["xtrade", "subscribe", "BTC-USDT", "ETH-USDT"]).unwrap();
+        let cli = Cli::try_parse_from(["xtrade", "subscribe", "BTC-USDT", "ETH-USDT"]).unwrap();
         match cli.command {
             Commands::Subscribe { symbols } => {
                 assert_eq!(symbols, vec!["BTC-USDT", "ETH-USDT"]);
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_verbose_flag() {
-        let cli = Cli::try_parse_from(&["xtrade", "--verbose", "status"]).unwrap();
+        let cli = Cli::try_parse_from(["xtrade", "--verbose", "status"]).unwrap();
         assert!(cli.verbose);
         assert_eq!(cli.effective_log_level(), "debug");
     }

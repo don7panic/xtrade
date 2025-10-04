@@ -559,13 +559,13 @@ impl BinanceWebSocket {
 
     /// Check if an error requires reconnection
     fn requires_reconnection(error: &tokio_tungstenite::tungstenite::Error) -> bool {
-        match error {
+        matches!(
+            error,
             tokio_tungstenite::tungstenite::Error::ConnectionClosed
-            | tokio_tungstenite::tungstenite::Error::AlreadyClosed
-            | tokio_tungstenite::tungstenite::Error::Io(_)
-            | tokio_tungstenite::tungstenite::Error::Tls(_) => true,
-            _ => false,
-        }
+                | tokio_tungstenite::tungstenite::Error::AlreadyClosed
+                | tokio_tungstenite::tungstenite::Error::Io(_)
+                | tokio_tungstenite::tungstenite::Error::Tls(_)
+        )
     }
 
     /// Check if currently connected

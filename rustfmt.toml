@@ -13,29 +13,10 @@ hard_tabs = false
 newline_style = "Unix"
 
 # Import formatting
-imports_granularity = "Crate"
 reorder_imports = true
-group_imports = "StdExternalCrate"
 
 # Code formatting
-fn_args_layout = "Tall"
-brace_style = "SameLineWhere"
-control_brace_style = "AlwaysSameLine"
-trailing_comma = "Vertical"
-
-# String formatting
-format_strings = true
-normalize_comments = true
-wrap_comments = true
-comment_width = 80
-
-# Macro formatting
-format_macro_matchers = true
-format_macro_bodies = true
+fn_params_layout = "Tall"
 
 # Other formatting options
-empty_item_single_line = true
-struct_lit_single_line = true
-fn_single_line = false
-where_single_line = false
 force_explicit_abi = true

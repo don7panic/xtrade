@@ -463,6 +463,7 @@ pub struct Ticker24hr {
 
 /// Error types for WebSocket operations
 #[derive(Debug, thiserror::Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum WebSocketError {
     #[error("WebSocket connection error: {0}")]
     ConnectionError(String),
@@ -529,13 +530,13 @@ impl OrderBookError {
 
     /// Returns true if this error requires fetching a new orderbook snapshot
     pub fn requires_resync(&self) -> bool {
-        match self {
-            OrderBookError::SequenceValidationFailed { .. } => true,
-            OrderBookError::PriceParseError(_) => true,
-            OrderBookError::QuantityParseError(_) => true,
-            OrderBookError::InvalidUpdate(_) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            OrderBookError::SequenceValidationFailed { .. }
+                | OrderBookError::PriceParseError(_)
+                | OrderBookError::QuantityParseError(_)
+                | OrderBookError::InvalidUpdate(_)
+        )
     }
 
     /// Returns the error severity level
