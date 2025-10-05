@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod market_data;
 pub mod metrics;
+pub mod session;
 pub mod ui;
 
 use anyhow::Result;

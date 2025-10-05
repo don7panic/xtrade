@@ -8,6 +8,9 @@ pub mod tui;
 /// Simple CLI output functions
 pub mod cli;
 
+/// UI Manager for interactive interface
+pub mod ui_manager;
+
 use crate::binance::types::OrderBook;
 use crate::metrics::ConnectionMetrics;
 use std::collections::HashMap;
