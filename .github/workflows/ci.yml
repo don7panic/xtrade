@@ -44,9 +44,6 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
-      - name: Run integration tests
-        run: cargo test --test integration_test --verbose
-
       - name: Check formatting
         run: cargo fmt -- --check
 
@@ -82,13 +79,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release --verbose
 
-      - name: Verify binary works
-        run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            .\target\release\xtrade.exe --version
-          else
-            ./target/release/xtrade --version
-          fi
+      - name: Verify binary works (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: ./target/release/xtrade --version
+
+      - name: Verify binary works (Windows)
+        if: runner.os == 'Windows'
+        run: ./target/release/xtrade.exe --version
 
   security-audit:
     name: Security Audit
