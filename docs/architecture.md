@@ -12,12 +12,13 @@
 
 ### 核心功能目标
 
-- **实时数据流订阅**：支持多个 Binance Spot 交易对的并发订阅（aggTrade、depth、24hrTicker）
-- **高质量数据展示**：TUI/CLI 界面提供实时价格、OrderBook、24h 统计、价格走势图（sparkline）
-- **数据完整性保障**：OrderBook 快照+增量更新验证、消息序列号检查、数据一致性监控
-- **连接稳定性**：智能重连机制、心跳检测、网络异常处理、连接状态实时显示
-- **性能监控**：端到端延迟测量、消息处理速度、内存使用情况、连接质量指标
-- **CLI 管理**：交易对订阅/取消、配置管理、状态查询、日志查看
+- **交互式终端会话**：一次启动进入长生命周期的交互式终端，支持命令输入、快捷键切换、状态栏提示与帮助引导。
+- **实时数据流订阅**：支持多个 Binance Spot 交易对的并发订阅（aggTrade、depth、24hrTicker）。
+- **高质量数据展示**：TUI 界面提供实时价格、OrderBook、24h 统计、价格走势图（sparkline）与通知区域。
+- **数据完整性保障**：OrderBook 快照+增量更新验证、消息序列号检查、数据一致性监控。
+- **连接稳定性**：智能重连机制、心跳检测、网络异常处理、连接状态实时显示。
+- **性能监控**：端到端延迟测量、消息处理速度、内存使用情况、连接质量指标，并在 UI 中可视化。
+- **会话内管理能力**：在终端内完成交易对订阅/取消、配置管理、状态查询、日志查看。
 
 ### 明确不包含（第二阶段）
 
@@ -35,9 +36,9 @@
 **架构特点**：
 
 - 所有功能模块在同一个 Rust 进程中运行
-- WebSocket 客户端、数据处理、OrderBook 维护、TUI 渲染统一管理
-- 基于 tokio 异步运行时的多任务并发处理
-- 配置文件驱动的模块化设计
+- WebSocket 客户端、数据处理、OrderBook 维护、交互式终端渲染统一管理
+- 基于 tokio 异步运行时的多任务并发处理，交互式会话与后台订阅任务通过异步通道通信
+- 配置文件驱动的模块化设计，可在会话内热更新关键参数
 
 **优势分析**：
 
@@ -49,7 +50,25 @@
 **未来扩展路径**：
 第二阶段可根据需要拆分成微服务架构或添加 IPC 接口，当前设计预留了模块化扩展能力。
 
-## 四、Binance WebSocket 集成设计
+## 四、交互式终端与后台协同设计
+
+### 会话层结构
+
+- **Session Manager**：启动/关闭交互式终端，维护运行状态与生命周期，负责恢复默认订阅并协调资源释放。
+- **Command Router**：解析用户输入（命令/快捷键），将其转换为内部 `Action`，并投递给后台任务或会话状态机。
+- **State Store**：集中管理订阅列表、当前聚焦交易对、UI 布局状态、性能指标缓存，向渲染层提供一致视图。
+- **UI Renderer**：基于 `ratatui` 渲染多面板布局（行情、订单簿、指标、日志），响应状态变化触发增量刷新。
+- **Notification Center**：对后台事件（重连、错误、告警）进行分类并推送到 UI 的消息区域。
+
+### 事件流与通信
+
+- **Action Channel**：会话层通过 `tokio::mpsc` 将命令投递到 `MarketDataManager` 或配置管理器。
+- **Market Event Bus**：市场数据引擎向会话层广播 `PriceTick`、`OrderBookUpdate`、`ConnectionEvent` 等结构化事件。
+- **State Update Loop**：会话层消费事件后更新 `State Store`，并触发 UI 局部刷新，确保界面实时响应且避免阻塞后台订阅。
+- **Metrics Pipeline**：后台任务持续产出延迟、速率、错误计数，汇聚到会话状态，在状态栏与 `stats` 面板中展示。
+- **Graceful Shutdown**：`quit/exit` 命令触发停止信号，等待所有后台任务结束、关闭 WebSocket，并持久化最新配置。
+
+## 五、Binance WebSocket 集成设计
 
 - symbol 映射：用户输入 BTC-USDT -> Binance 要求格式如 BTCUSDT（通常小写用于 stream：btcusdt）。  
 - WebSocket 源：使用 Binance 公共 stream，例如：wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade 或 bbc combined stream 支持多流。  
@@ -61,7 +80,7 @@
 - 延迟测量：事件中含有 eventTime 或 tradeTime，计算 now - eventTime 做端到端延迟统计，另外记录本地 receive timestamp。展示平均/95%/max 延迟。  
 - 健壮性：心跳、ping/pong、指数退避重连（backoff）、并在重连后重新获取 snapshot 完成状态恢复。记录断连次数与最近恢复时间并在 UI 呈现。
 
-## 五、第一阶段数据模型设计
+## 六、第一阶段数据模型设计
 
 ### 核心数据结构（Rust）
 
@@ -120,7 +139,7 @@ struct Config {
 }
 ```
 
-## 六、第一阶段技术栈选择
+## 七、第一阶段技术栈选择
 
 ### 核心运行时与网络
 
@@ -135,7 +154,7 @@ struct Config {
 - **数值精度**：`ordered-float = "4.0"` - OrderBook价格排序  
 - **时间处理**：`chrono = "0.4"` - 时间戳处理与格式化
 
-### CLI与用户界面
+### 交互层与用户界面
 
 - **命令行解析**：`clap = "4.4"` - 现代CLI框架，支持子命令  
 - **TUI框架**：`ratatui = "0.25"` - 强大的终端UI库
@@ -154,29 +173,28 @@ struct Config {
 - **集成测试**：`wiremock = "0.5"` - Mock Binance API服务器
 - **基准测试**：`criterion = "0.5"` - 性能基准测试
 
-## 七、第一阶段CLI与TUI设计
+## 八、第一阶段交互式终端设计
 
-### CLI命令接口
+### 会话入口与模式
 
-```bash
-# 基础订阅命令
-xtrade subscribe BTC-USDT                    # 单个交易对订阅  
-xtrade subscribe BTC-USDT,ETH-USDT,BNB-USDT # 多交易对订阅
-xtrade unsubscribe BTC-USDT                  # 取消订阅
-xtrade list                                  # 查看当前订阅
+- `xtrade` 命令启动后立即进入交互式终端，加载默认配置与订阅列表。
+- 会话分为命令行模式（底部输入框）与快捷键模式（全局导航），默认显示欢迎面板与状态栏。
+- 状态栏持续显示连接状态、订阅数量、平均延迟、消息速率等核心指标。
+- 支持热重载：当配置文件更新或用户执行 `config set` 命令时，会话层触发后台任务更新。
 
-# 显示模式
-xtrade ui                                    # 启动TUI界面
-xtrade ui --simple                           # 简化CLI输出
-xtrade show BTC-USDT                         # 单交易对详情
+### 命令体系与内部 Action
 
-# 配置与监控
-xtrade status                                # 连接状态和指标
-xtrade config --file custom.toml             # 指定配置文件
-xtrade logs --tail 100                       # 查看日志
-```
+- `add <pairs>`：新增订阅；解析多个交易对后向 `MarketDataManager` 发送 `SubscribeAction`。
+- `remove <pairs>`：取消订阅；触发 `UnsubscribeAction` 并清理状态缓存。
+- `pairs`：查询当前订阅状态、最新行情快照、连接健康度。
+- `focus <pair>`：切换主展示面板；更新 `State Store` 中的 `focused_pair`。
+- `stats`：展开性能指标弹窗，展示延迟分布、吞吐率、重连次数。
+- `logs [--tail N]`：读取最近日志缓冲区或写入文件。
+- `config <key> <value>`：动态调整刷新频率、展示模式等配置，必要时触发 UI 重绘。
+- `help` / `?`：输出命令说明与快捷键列表。
+- `quit` / `exit`：执行优雅退出流程，等待后台任务结束。
 
-### TUI界面布局设计
+### 布局与面板
 
 ```
 ┌─ XTrade Market Data Monitor ──────────────────────────────────────┐
@@ -198,16 +216,16 @@ xtrade logs --tail 100                       # 查看日志
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-### 键盘交互设计
+### 键盘与命令交互
 
-- `Tab` / `Shift+Tab`: 切换交易对标签页
-- `↑` / `↓`: 滚动OrderBook或日志
-- `r`: 强制重连WebSocket  
-- `p`: 暂停/恢复数据流
-- `s`: 保存当前快照到文件
-- `q` / `Ctrl+C`: 退出程序
+- `Tab` / `Shift+Tab`: 在交易对标签页间切换，并同步更新 `focused_pair`。
+- `↑` / `↓`: 滚动 OrderBook 或日志面板。
+- `r`: 向后台发送 `ReconnectAction`，强制重连所有订阅。
+- `p`: 切换暂停/恢复渲染节流，用于定位性能问题。
+- `s`: 保存当前交易对的 OrderBook 快照至文件。
+- `q` / `Ctrl+C`: 与 `quit` 命令等效，触发优雅退出。
 
-## 八、第一阶段性能优化策略
+## 九、第一阶段性能优化策略
 
 ### 核心性能目标
 
@@ -239,30 +257,30 @@ xtrade logs --tail 100                       # 查看日志
 - **并发控制**：每个交易对独立tokio任务，避免互相影响  
 - **错误隔离**：单个交易对异常不影响其他数据流
 
-## 九、第一阶段开发计划
+## 十、第一阶段开发计划
 
 ### 开发里程碑（3周计划）
 
 #### Week 1: 基础架构（Day 1-7）
 
-- **Day 1-2**: 项目初始化、Cargo配置、CLI框架搭建（clap）
-- **Day 3-4**: 配置管理系统、日志系统、基础错误处理  
-- **Day 5-6**: Binance WebSocket连接、基础消息解析
-- **Day 7**: 单交易对OrderBook快照获取与验证
+- **Day 1-2**: 项目初始化、Cargo 配置、交互式会话骨架（tokio runtime + session loop）
+- **Day 3-4**: 命令解析与路由器、配置管理系统、日志系统、基础错误处理
+- **Day 5-6**: Binance WebSocket 连接、基础消息解析、Action 通道打通
+- **Day 7**: 单交易对 OrderBook 快照获取与验证、State Store 初版
 
-#### Week 2: 核心功能（Day 8-14）  
+#### Week 2: 核心功能（Day 8-14）
 
-- **Day 8-9**: OrderBook增量更新逻辑、数据完整性验证
-- **Day 10-11**: 重连机制、错误恢复、连接监控
-- **Day 12-13**: 多交易对并发订阅、性能优化
-- **Day 14**: 延迟测量、指标收集系统
+- **Day 8-9**: OrderBook 增量更新逻辑、数据完整性验证、State Store 同步
+- **Day 10-11**: 重连机制、错误恢复、连接监控事件推送至通知中心
+- **Day 12-13**: 多交易对并发订阅、性能优化、Action/事件通道压测
+- **Day 14**: 延迟测量、指标收集系统、状态栏数据接入
 
 #### Week 3: 用户界面（Day 15-21）
 
-- **Day 15-16**: TUI基础框架、布局设计（ratatui）  
-- **Day 17-18**: 实时数据展示、OrderBook渲染
-- **Day 19-20**: 键盘交互、多交易对切换、Sparkline
-- **Day 21**: 集成测试、性能测试、文档完善
+- **Day 15-16**: TUI 面板框架、布局设计（ratatui）、状态栏雏形
+- **Day 17-18**: 实时数据展示、OrderBook 渲染、通知面板
+- **Day 19-20**: 键盘交互、多交易对切换、命令输入框体验优化、Sparkline
+- **Day 21**: 集成测试、性能测试、文档完善（含交互式终端指南）
 
 ### 第二阶段预留接口
 
@@ -273,7 +291,7 @@ xtrade logs --tail 100                       # 查看日志
 - **事件系统**：内部事件总线，便于添加新的数据消费者
 - **数据抽象**：Exchange适配器模式，便于支持多交易所
 
-## 十、第一阶段测试策略
+## 十一、第一阶段测试策略
 
 - 使用 Binance Testnet 或搭建本地 mock server（返回预先录制的流）进行稳定性测试。  
 - 压力测试：模拟高频 trade/depth 消息，观察内存、CPU 与延迟（可用 wrk-like 工具或自写模拟器）。  
@@ -283,7 +301,7 @@ xtrade logs --tail 100                       # 查看日志
 ## 十二、交付物（建议）
 
 - 一个可交付二进制（Linux/macOS/Windows）或 Docker image（单进程模式）。  
-- README：启动方式、配置、常见故障排查。  
+- README：启动方式、交互式终端使用说明、配置、常见故障排查。
 - 示例配置与常见 pair 列表、Testnet 快速对接指引。  
 - 若选分离模式：protobuf/gRPC 接口定义或 JSON schema。
 
