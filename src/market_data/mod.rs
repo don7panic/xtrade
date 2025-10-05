@@ -33,7 +33,7 @@ struct SubscriptionInfo {
 }
 
 /// Market event for communication between subscription tasks and manager
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MarketEvent {
     PriceUpdate {
         symbol: String,

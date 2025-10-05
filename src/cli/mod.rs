@@ -69,7 +69,7 @@ pub enum Commands {
     Demo,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ConfigAction {
     /// Show current configuration
     Show,
