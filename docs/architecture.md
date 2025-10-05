@@ -50,7 +50,26 @@
 **未来扩展路径**：
 第二阶段可根据需要拆分成微服务架构或添加 IPC 接口，当前设计预留了模块化扩展能力。
 
-## 四、交互式终端与后台协同设计
+## 四、系统架构（第一阶段简化版）
+
+### 核心组件
+
+- **Interactive Session Layer**：负责会话生命周期管理、命令解析、快捷键处理、帮助提示与状态栏渲染。
+- **Command Router & Action Dispatcher**：将用户输入映射为订阅/配置/查询等动作，协调后台任务执行并返回结果。
+- **Market Data Engine**：WebSocket 连接管理、数据解析、OrderBook 维护、行情事件广播。
+- **Display Layer**：TUI/Terminal 渲染、实时数据展示、面板布局、通知区与日志面板。
+- **Binance Adapter**：WebSocket 客户端、数据格式转换、连接重试、REST 快照获取。
+- **Configuration Manager**：TOML/YAML 配置文件读取、会话内动态参数更新、持久化默认订阅。
+- **Logging & Metrics System**：结构化日志、性能指标收集、延迟可视化数据提供。
+
+### 第二阶段扩展
+
+- **Trading Engine**（下单、撤单、持仓管理）
+- **Alert System**（条件监控、通知发送）  
+- **Storage Layer**（SQLite 持久化）
+- **Security Manager**（API 密钥管理）
+
+## 五、交互式终端与后台协同设计
 
 ### 会话层结构
 
@@ -68,7 +87,7 @@
 - **Metrics Pipeline**：后台任务持续产出延迟、速率、错误计数，汇聚到会话状态，在状态栏与 `stats` 面板中展示。
 - **Graceful Shutdown**：`quit/exit` 命令触发停止信号，等待所有后台任务结束、关闭 WebSocket，并持久化最新配置。
 
-## 五、Binance WebSocket 集成设计
+## 六、Binance WebSocket 集成设计
 
 - symbol 映射：用户输入 BTC-USDT -> Binance 要求格式如 BTCUSDT（通常小写用于 stream：btcusdt）。  
 - WebSocket 源：使用 Binance 公共 stream，例如：wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade 或 bbc combined stream 支持多流。  
@@ -80,7 +99,7 @@
 - 延迟测量：事件中含有 eventTime 或 tradeTime，计算 now - eventTime 做端到端延迟统计，另外记录本地 receive timestamp。展示平均/95%/max 延迟。  
 - 健壮性：心跳、ping/pong、指数退避重连（backoff）、并在重连后重新获取 snapshot 完成状态恢复。记录断连次数与最近恢复时间并在 UI 呈现。
 
-## 六、第一阶段数据模型设计
+## 七、第一阶段数据模型设计
 
 ### 核心数据结构（Rust）
 
@@ -139,7 +158,7 @@ struct Config {
 }
 ```
 
-## 七、第一阶段技术栈选择
+## 八、第一阶段技术栈选择
 
 ### 核心运行时与网络
 
@@ -173,7 +192,7 @@ struct Config {
 - **集成测试**：`wiremock = "0.5"` - Mock Binance API服务器
 - **基准测试**：`criterion = "0.5"` - 性能基准测试
 
-## 八、第一阶段交互式终端设计
+## 九、第一阶段交互式终端设计
 
 ### 会话入口与模式
 
@@ -225,7 +244,7 @@ struct Config {
 - `s`: 保存当前交易对的 OrderBook 快照至文件。
 - `q` / `Ctrl+C`: 与 `quit` 命令等效，触发优雅退出。
 
-## 九、第一阶段性能优化策略
+## 十、第一阶段性能优化策略
 
 ### 核心性能目标
 
@@ -257,7 +276,7 @@ struct Config {
 - **并发控制**：每个交易对独立tokio任务，避免互相影响  
 - **错误隔离**：单个交易对异常不影响其他数据流
 
-## 十、第一阶段开发计划
+## 十一、第一阶段开发计划
 
 ### 开发里程碑（3周计划）
 
@@ -291,21 +310,21 @@ struct Config {
 - **事件系统**：内部事件总线，便于添加新的数据消费者
 - **数据抽象**：Exchange适配器模式，便于支持多交易所
 
-## 十一、第一阶段测试策略
+## 十二、第一阶段测试策略
 
 - 使用 Binance Testnet 或搭建本地 mock server（返回预先录制的流）进行稳定性测试。  
 - 压力测试：模拟高频 trade/depth 消息，观察内存、CPU 与延迟（可用 wrk-like 工具或自写模拟器）。  
 - 恢复测试：中断网络，验证重连逻辑、snapshot 重新初始化是否正确。  
 - 延迟验证：对比事件中的 eventTime 与接收时间的统计分布。
 
-## 十二、交付物（建议）
+## 十三、交付物（建议）
 
 - 一个可交付二进制（Linux/macOS/Windows）或 Docker image（单进程模式）。  
 - README：启动方式、交互式终端使用说明、配置、常见故障排查。
 - 示例配置与常见 pair 列表、Testnet 快速对接指引。  
 - 若选分离模式：protobuf/gRPC 接口定义或 JSON schema。
 
-## 十三、风险与缓解
+## 十四、风险与缓解
 
 - API 变更：保持模块化的 adapter 层，便于未来切换或升级。  
 - 资源限制：大 pair 时注意内存增长，必要时做限流或分布式采集。  
