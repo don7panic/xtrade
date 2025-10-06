@@ -1,7 +1,7 @@
 # XTrade Configuration File
 
 # Trading symbols to monitor by default
-symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+symbols = ["BTCUSDT", "ETHUSDT"]
 
 # UI refresh rate in milliseconds
 refresh_rate_ms = 100

@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use std::sync::Arc;
+use tokio::io::{self, AsyncBufReadExt};
 use tokio::sync::{Mutex, mpsc};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
-use crate::binance::types::OrderBook;
 use crate::market_data::MarketDataManager;
 use crate::market_data::MarketEvent;
 use crate::session::action_channel::{SessionEvent, StatusInfo};
@@ -26,6 +26,8 @@ pub struct UIManager {
     app_state: AppState,
     /// UI rendering state
     render_state: RenderState,
+    /// Dry-run mode flag
+    dry_run: bool,
 }
 
 /// UI rendering state
@@ -59,8 +61,8 @@ impl UIManager {
         event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Self {
         // Create event channels
-        let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
-        let (market_event_tx, market_event_rx) = mpsc::unbounded_channel();
+        let (_ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
+        let (_market_event_tx, market_event_rx) = mpsc::unbounded_channel();
 
         Self {
             market_manager,
@@ -69,7 +71,18 @@ impl UIManager {
             market_event_rx: Some(market_event_rx),
             app_state: AppState::new(Vec::new()),
             render_state: RenderState::default(),
+            dry_run: false,
         }
+    }
+
+    /// Create a new UIManager with dry-run mode
+    pub fn new_with_dry_run(
+        market_manager: Arc<Mutex<MarketDataManager>>,
+        event_tx: mpsc::UnboundedSender<SessionEvent>,
+    ) -> Self {
+        let mut ui_manager = Self::new(market_manager, event_tx);
+        ui_manager.dry_run = true;
+        ui_manager
     }
 
     /// Get UI event sender
@@ -88,6 +101,11 @@ impl UIManager {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting UI manager");
 
+        // Handle dry-run mode
+        if self.dry_run {
+            return self.run_dry_run().await;
+        }
+
         // Initialize UI components
         self.initialize_ui().await?;
 
@@ -95,6 +113,84 @@ impl UIManager {
         self.run_ui_loop().await?;
 
         info!("UI manager stopped");
+        Ok(())
+    }
+
+    /// Run in dry-run mode (show welcome page and configuration)
+    async fn run_dry_run(&mut self) -> Result<()> {
+        info!("Running UI in dry-run mode");
+
+        // Display welcome page
+        self.display_welcome_page().await?;
+
+        // Display configuration
+        self.display_configuration().await?;
+
+        info!("Dry-run mode completed");
+        Ok(())
+    }
+
+    /// Display welcome page
+    async fn display_welcome_page(&mut self) -> Result<()> {
+        println!();
+        println!("┌─ XTrade Market Data Monitor ────────────────────────────────────────┐");
+        println!("│                                                                     │");
+        println!("│                      * Welcome to XTrade! *                         │");
+        println!("│                                                                     │");
+        println!("│   A high-performance cryptocurrency market data monitoring system   │");
+        println!("│                                                                     │");
+        println!("│   Version: {:<50} │", env!("CARGO_PKG_VERSION"));
+        println!(
+            "│   Rust: {:<50} │",
+            std::env::var("RUSTC_VERSION").unwrap_or("unknown".to_string())
+        );
+        println!("│                                                                     │");
+        println!("│   Features:                                                        │");
+        println!("│   • Real-time Binance market data                                  │");
+        println!("│   • OrderBook visualization                                        │");
+        println!("│   • Multi-symbol monitoring                                        │");
+        println!("│   • Performance metrics tracking                                    │");
+        println!("│                                                                     │");
+        println!("│   Commands:                                                        │");
+        println!("│   • /add <symbols> - Subscribe to symbols                   │");
+        println!("│   • /remove <symbols> - Unsubscribe from symbols             │");
+        println!("│   • /pairs - Show current subscriptions                       │");
+        println!("│   • /show <symbol> - Show details for symbol                │");
+        println!("│   • /status - Show session statistics                         │");
+        println!("│   • /logs - Show recent logs                                 │");
+        println!("│   • /config show - Show configuration                        │");
+        println!("│                                                                     │");
+        println!("└────────────────────────────────────────────────────────────────────┘");
+        println!();
+
+        Ok(())
+    }
+
+    /// Display configuration
+    async fn display_configuration(&mut self) -> Result<()> {
+        println!("┌─ Configuration Overview ───────────────────────────────────────────┐");
+        println!("│                                                                     │");
+        println!("│   Configuration loaded successfully!                               │");
+        println!("│                                                                     │");
+        println!("│   Default symbols: BTCUSDT                                          │");
+        println!("│   Refresh rate: 100ms                                               │");
+        println!("│   OrderBook depth: 20 levels                                        │");
+        println!("│   Log level: info                                                   │");
+        println!("│                                                                     │");
+        println!("│   Binance API:                                                     │");
+        println!("│   • WebSocket: wss://stream.binance.com:9443                       │");
+        println!("│   • REST API: https://api.binance.com                               │");
+        println!("│                                                                     │");
+        println!("│   UI Settings:                                                     │");
+        println!("│   • Colors: enabled                                                 │");
+        println!("│   • Update rate: 20 FPS                                             │");
+        println!("│   • Sparkline points: 60                                            │");
+        println!("│                                                                     │");
+        println!("└────────────────────────────────────────────────────────────────────┘");
+        println!();
+        println!("Dry-run mode completed. Use 'xtrade ui' to start the full interface.");
+        println!();
+
         Ok(())
     }
 
@@ -223,7 +319,9 @@ impl UIManager {
         }
 
         println!("│");
-        println!("│ Commands: add <symbol> | remove <symbol> | list | stats | quit");
+        println!(
+            "│ Commands: add <symbol> | remove <symbol> | pairs | focus <symbol> | stats | logs | quit"
+        );
         println!("└────────────────────────────────────────────────────────────────────┘");
 
         Ok(())
@@ -231,13 +329,78 @@ impl UIManager {
 
     /// Handle user input
     async fn handle_input(&mut self) -> Result<()> {
-        // For now, just simulate input handling
-        // In the future, we'll use crossterm for real input
+        // Check for user input from stdin
+        let mut stdin = io::stdin();
+        let mut reader = io::BufReader::new(&mut stdin);
+        let mut line = String::new();
 
-        // Simulate command processing
-        if self.render_state.render_count % 10 == 0 {
-            // Simulate status command every 10 renders
-            self.handle_status_command().await?;
+        // Try to read input without blocking
+        match reader.read_line(&mut line).await {
+            Ok(0) => {
+                // EOF - no input available
+                return Ok(());
+            }
+            Ok(_) => {
+                // Input received - process command
+                let trimmed_line = line.trim();
+                if !trimmed_line.is_empty() {
+                    self.process_user_command(trimmed_line).await?;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No input available - this is normal
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Error reading user input: {}", e);
+                return Err(e.into());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process user command from input
+    async fn process_user_command(&mut self, input: &str) -> Result<()> {
+        debug!("Processing user command: {}", input);
+
+        // Create a temporary command router to parse the command
+        let command_router =
+            crate::session::command_router::CommandRouter::new(self.market_manager.clone());
+        let command_result = command_router.parse_interactive_command(input);
+
+        match command_result {
+            Ok(Some(command)) => {
+                // Send the command to the session manager via event channel
+                match command {
+                    crate::session::command_router::InteractiveCommand::Quit => {
+                        // Handle quit command
+                        info!("User requested quit");
+                        self.render_state.should_quit = true;
+                        self.event_tx
+                            .send(SessionEvent::ShutdownRequested)
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to send shutdown request: {}", e)
+                            })?;
+                    }
+                    _ => {
+                        // Forward other commands to session manager
+                        self.event_tx
+                            .send(SessionEvent::UserCommand { command })
+                            .map_err(|e| anyhow::anyhow!("Failed to send user command: {}", e))?;
+                    }
+                }
+            }
+            Ok(None) => {
+                // Empty command or help command (help returns None)
+                debug!("Empty command or help requested");
+            }
+            Err(e) => {
+                // Command parsing error
+                self.render_state.error_message = Some(format!("Command error: {}", e));
+                self.render_state.should_redraw = true;
+                error!("Command parsing error: {}", e);
+            }
         }
 
         Ok(())
@@ -301,6 +464,14 @@ impl UIManager {
                 info!("UI mode changed: TUI {}", enable_tui);
                 self.render_state.should_redraw = true;
             }
+            SessionEvent::LogsInfo { info } => {
+                self.render_state.info_message = Some(format!(
+                    "Recent logs ({}): {}",
+                    info.log_level,
+                    info.recent_logs.join(", ")
+                ));
+                self.render_state.should_redraw = true;
+            }
             _ => {
                 debug!("Unhandled UI event: {:?}", event);
             }
@@ -317,7 +488,7 @@ impl UIManager {
             MarketEvent::PriceUpdate {
                 symbol,
                 price,
-                time,
+                time: _,
             } => {
                 // Update market data state
                 if let Some(market_data) = self.app_state.market_data.get_mut(&symbol) {

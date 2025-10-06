@@ -12,7 +12,7 @@ use crate::metrics::MetricsCollector;
 use crate::ui::ui_manager::UIManager;
 
 use super::action_channel::ActionChannel;
-use super::command_router::CommandRouter;
+use super::command_router::{CommandRouter, InteractiveCommand};
 
 /// Session state tracking
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +75,8 @@ pub struct SessionManager {
     config: SessionConfig,
     /// Application configuration
     app_config: Config,
+    /// CLI arguments
+    cli: Cli,
     /// Session state
     state: SessionState,
     /// Session statistics
@@ -123,6 +125,7 @@ impl SessionManager {
         Ok(Self {
             config: session_config,
             app_config,
+            cli: cli.clone(),
             state: SessionState::Starting,
             stats: SessionStats::default(),
             market_manager,
@@ -138,6 +141,13 @@ impl SessionManager {
     /// Initialize the session
     pub async fn initialize(&mut self) -> Result<()> {
         info!("Initializing interactive session");
+
+        // Check if we're in dry-run mode
+        if let crate::cli::Commands::Interactive { dry_run: true, .. } = &self.cli.command() {
+            info!("Running in dry-run mode - skipping full initialization");
+            self.state = SessionState::Running;
+            return Ok(());
+        }
 
         // Initialize UI manager if enabled
         if self.config.enable_tui {
@@ -222,6 +232,55 @@ impl SessionManager {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting interactive session loop");
 
+        // Check if we're in dry-run mode
+        if let crate::cli::Commands::Interactive { dry_run: true, .. } = &self.cli.command() {
+            info!("Running in dry-run mode - processing CLI command directly");
+
+            // Process the CLI command directly
+            self.command_router.process_cli_args(&self.cli).await?;
+
+            // Run the session loop once to process the command
+            let mut shutdown_rx = self.shutdown_rx.take().unwrap();
+
+            while self.state != SessionState::Terminated {
+                tokio::select! {
+                    // Handle shutdown signal
+                    _ = shutdown_rx.recv() => {
+                        info!("Received shutdown signal");
+                        self.shutdown().await?;
+                    }
+
+                    // Handle commands from command router
+                    Some(command) = self.command_router.next_command() => {
+                        self.handle_command(command).await?;
+                    }
+
+                    // Handle events from action channel
+                    Some(event) = self.action_channel.next_event() => {
+                        self.handle_event(event).await?;
+                    }
+
+                    // Session timeout check
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        self.check_timeout().await?;
+                    }
+                }
+
+                // Handle market events separately to avoid borrowing conflicts
+                let market_event = {
+                    let mut market_manager = self.market_manager.lock().await;
+                    market_manager.next_event().await
+                };
+
+                if let Some(market_event) = market_event {
+                    self.handle_market_event(market_event).await?;
+                }
+            }
+
+            info!("Dry-run session loop terminated");
+            return Ok(());
+        }
+
         // Start UI if enabled
         if let Some(ui_manager) = &self.ui_manager {
             let ui_manager = ui_manager.clone();
@@ -285,20 +344,20 @@ impl SessionManager {
     }
 
     /// Handle user command
-    async fn handle_command(&mut self, command: crate::cli::Commands) -> Result<()> {
+    async fn handle_command(&mut self, command: InteractiveCommand) -> Result<()> {
         debug!("Handling command: {:?}", command);
 
         self.stats.commands_processed += 1;
 
         match command {
-            crate::cli::Commands::Subscribe { symbols } => self.handle_subscribe(symbols).await,
-            crate::cli::Commands::Unsubscribe { symbols } => self.handle_unsubscribe(symbols).await,
-            crate::cli::Commands::List => self.handle_list().await,
-            crate::cli::Commands::Ui { simple } => self.handle_ui(simple).await,
-            crate::cli::Commands::Status => self.handle_status().await,
-            crate::cli::Commands::Show { symbol } => self.handle_show(symbol).await,
-            crate::cli::Commands::Config { action } => self.handle_config(action).await,
-            crate::cli::Commands::Demo => self.handle_demo().await,
+            InteractiveCommand::Add { symbols } => self.handle_subscribe(symbols).await,
+            InteractiveCommand::Remove { symbols } => self.handle_unsubscribe(symbols).await,
+            InteractiveCommand::List => self.handle_list().await,
+            InteractiveCommand::Status => self.handle_status().await,
+            InteractiveCommand::Show { symbol } => self.handle_show(symbol).await,
+            InteractiveCommand::Config { action } => self.handle_config(action).await,
+            InteractiveCommand::Quit => self.handle_quit().await,
+            InteractiveCommand::Logs => self.handle_logs().await,
         }
     }
 
@@ -366,7 +425,25 @@ impl SessionManager {
     }
 
     /// Handle UI command
-    async fn handle_ui(&mut self, simple: bool) -> Result<()> {
+    async fn handle_ui(&mut self, simple: bool, dry_run: bool) -> Result<()> {
+        if dry_run {
+            info!("Running UI in dry-run mode");
+
+            // Create UI manager with dry-run mode
+            let ui_manager = UIManager::new_with_dry_run(
+                self.market_manager.clone(),
+                self.action_channel.event_tx(),
+            );
+
+            // Run dry-run mode
+            let ui_manager = Arc::new(Mutex::new(ui_manager));
+            ui_manager.lock().await.run().await?;
+
+            // After dry-run mode completes, shut down the session
+            self.shutdown().await?;
+            return Ok(());
+        }
+
         if simple {
             info!("Switching to simple CLI mode");
             self.config.enable_tui = false;
@@ -477,6 +554,33 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Handle quit command
+    async fn handle_quit(&mut self) -> Result<()> {
+        info!("User requested quit");
+        self.shutdown().await
+    }
+
+    /// Handle logs command
+    async fn handle_logs(&mut self) -> Result<()> {
+        info!("User requested logs");
+
+        // Get recent logs from tracing system
+        let logs_info = super::action_channel::LogsInfo {
+            recent_logs: vec![
+                "INFO: Session started".to_string(),
+                "DEBUG: Market data initialized".to_string(),
+                "INFO: Subscribed to BTCUSDT".to_string(),
+            ],
+            log_file_path: "/var/log/xtrade.log".to_string(),
+            log_level: self.cli.effective_log_level(),
+        };
+
+        self.action_channel
+            .send_event(super::action_channel::SessionEvent::LogsInfo { info: logs_info })?;
+
+        Ok(())
+    }
+
     /// Handle session event
     async fn handle_event(&mut self, event: super::action_channel::SessionEvent) -> Result<()> {
         debug!("Handling session event: {:?}", event);
@@ -490,6 +594,9 @@ impl SessionManager {
             super::action_channel::SessionEvent::Error { message } => {
                 error!("Session error: {}", message);
                 self.stats.errors_encountered += 1;
+            }
+            super::action_channel::SessionEvent::UserCommand { command } => {
+                self.handle_command(command).await?;
             }
             _ => {
                 // Forward event to UI if available

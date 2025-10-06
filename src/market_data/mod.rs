@@ -72,6 +72,7 @@ pub struct SubscriptionHandle {
 /// Market data manager for handling multiple symbol subscriptions
 pub struct MarketDataManager {
     subscriptions: RwLock<HashMap<String, SubscriptionHandle>>,
+    orderbooks: RwLock<HashMap<String, OrderBook>>,
     _rest_client: BinanceRestClient,
     event_tx: mpsc::UnboundedSender<MarketEvent>,
     event_rx: Option<mpsc::UnboundedReceiver<MarketEvent>>,
@@ -84,6 +85,7 @@ impl MarketDataManager {
 
         Self {
             subscriptions: RwLock::new(HashMap::new()),
+            orderbooks: RwLock::new(HashMap::new()),
             _rest_client: BinanceRestClient::new("https://api.binance.com".to_string()),
             event_tx,
             event_rx: Some(event_rx),
@@ -316,44 +318,122 @@ impl MarketDataManager {
     }
 
     /// Get orderbook for a symbol
-    pub async fn get_orderbook(&self, _symbol: &str) -> Option<OrderBook> {
-        // This would need to be implemented with proper state management
-        // For now, return None as we need to track orderbook state
-        None
+    pub async fn get_orderbook(&self, symbol: &str) -> Option<OrderBook> {
+        let orderbooks = self.orderbooks.read().await;
+        orderbooks.get(symbol).cloned()
     }
 
     /// Recover subscription state after reconnection
     pub async fn recover_subscription(&mut self, symbol: &str) -> Result<()> {
-        // Implementation would involve reconnecting WebSocket and fetching fresh snapshot
-        // For now, just log the attempt
         info!("Recovering subscription for symbol: {}", symbol);
+
+        // Check if symbol is subscribed
+        let subscriptions = self.subscriptions.read().await;
+        if !subscriptions.contains_key(symbol) {
+            return Err(anyhow::anyhow!("Symbol {} is not subscribed", symbol));
+        }
+
+        // Send reconnect signal to subscription
+        if let Some(handle) = subscriptions.get(symbol) {
+            if let Err(e) = handle.control_tx.send(ControlMessage::Reconnect) {
+                error!("Failed to send reconnect signal for {}: {}", symbol, e);
+                return Err(e.into());
+            }
+        }
+
+        info!("Successfully initiated recovery for symbol: {}", symbol);
         Ok(())
     }
 
     /// Check if subscription needs recovery
-    pub async fn needs_recovery(&self, _symbol: &str, _max_stale_time_ms: u64) -> bool {
-        // Implementation would check last update time
-        // For now, return false
-        false
+    pub async fn needs_recovery(&self, symbol: &str, max_stale_time_ms: u64) -> bool {
+        let orderbooks = self.orderbooks.read().await;
+
+        if let Some(orderbook) = orderbooks.get(symbol) {
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
+            let time_since_last_update = current_time.saturating_sub(orderbook.last_update_id);
+
+            time_since_last_update > max_stale_time_ms
+        } else {
+            // No orderbook data available, assume recovery needed
+            true
+        }
     }
 
     /// Handle reconnection event
-    pub async fn handle_reconnection(&mut self, _max_stale_time_ms: u64) -> Result<()> {
+    pub async fn handle_reconnection(&mut self, max_stale_time_ms: u64) -> Result<()> {
         info!("Handling reconnection event");
+
+        let subscriptions = self.subscriptions.read().await;
+        let symbols: Vec<String> = subscriptions.keys().cloned().collect();
+
+        for symbol in symbols {
+            if self.needs_recovery(&symbol, max_stale_time_ms).await {
+                info!("Symbol {} needs recovery, triggering reconnect", symbol);
+
+                // Send reconnect signal
+                if let Some(handle) = subscriptions.get(&symbol) {
+                    if let Err(e) = handle.control_tx.send(ControlMessage::Reconnect) {
+                        error!("Failed to send reconnect signal for {}: {}", symbol, e);
+                    }
+                }
+            }
+        }
+
+        info!("Reconnection event handled");
         Ok(())
     }
 
     /// Get connection quality metrics
-    pub async fn get_connection_quality(&self, _symbol: &str) -> Option<ConnectionQuality> {
-        // Implementation would calculate connection quality metrics
-        // For now, return None
-        None
+    pub async fn get_connection_quality(&self, symbol: &str) -> Option<ConnectionQuality> {
+        let orderbooks = self.orderbooks.read().await;
+
+        if let Some(orderbook) = orderbooks.get(symbol) {
+            let time_since_last_update_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                - orderbook.last_update_id;
+
+            let data_freshness = if time_since_last_update_ms < 1000 {
+                "fresh".to_string()
+            } else if time_since_last_update_ms < 5000 {
+                "stale".to_string()
+            } else {
+                "outdated".to_string()
+            };
+
+            let spread = orderbook.spread().unwrap_or(0.0);
+
+            Some(ConnectionQuality {
+                symbol: symbol.to_string(),
+                data_freshness,
+                time_since_last_update_ms,
+                orderbook_depth: orderbook.bids.len() + orderbook.asks.len(),
+                spread,
+            })
+        } else {
+            None
+        }
     }
 
     /// Get next market event
     pub async fn next_event(&mut self) -> Option<MarketEvent> {
         if let Some(event_rx) = &mut self.event_rx {
-            event_rx.recv().await
+            if let Some(event) = event_rx.recv().await {
+                // Track orderbook updates
+                if let MarketEvent::OrderBookUpdate { symbol, orderbook } = &event {
+                    let mut orderbooks = self.orderbooks.write().await;
+                    orderbooks.insert(symbol.clone(), orderbook.clone());
+                }
+                Some(event)
+            } else {
+                None
+            }
         } else {
             None
         }
