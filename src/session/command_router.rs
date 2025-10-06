@@ -3,19 +3,43 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::cli::{Cli, Commands};
 use crate::market_data::MarketDataManager;
+use tracing::warn;
+
+/// Interactive commands for the terminal session
+#[derive(Debug, Clone)]
+pub enum InteractiveCommand {
+    /// Add symbol to subscription (alias for subscribe)
+    Add { symbols: Vec<String> },
+    /// Remove symbol from subscription (alias for unsubscribe)
+    Remove { symbols: Vec<String> },
+    /// List currently subscribed symbols
+    List,
+    /// Show connection status and metrics
+    Status,
+    /// Show detailed information for a specific symbol
+    Show { symbol: String },
+    /// Quit the application
+    Quit,
+    /// Show recent logs
+    Logs,
+    /// Configuration management
+    Config {
+        action: Option<crate::cli::ConfigAction>,
+    },
+}
 
 /// Command router for processing interactive commands
 pub struct CommandRouter {
     /// Market data manager reference
     market_manager: Arc<Mutex<MarketDataManager>>,
     /// Command input channel
-    command_tx: mpsc::UnboundedSender<Commands>,
+    command_tx: mpsc::UnboundedSender<InteractiveCommand>,
     /// Command input receiver
-    command_rx: Option<mpsc::UnboundedReceiver<Commands>>,
+    command_rx: Option<mpsc::UnboundedReceiver<InteractiveCommand>>,
     /// Interactive mode flag
     interactive_mode: bool,
 }
@@ -48,14 +72,14 @@ impl CommandRouter {
     }
 
     /// Send command to router
-    pub fn send_command(&self, command: Commands) -> Result<()> {
+    pub fn send_command(&self, command: InteractiveCommand) -> Result<()> {
         self.command_tx
             .send(command)
             .map_err(|e| anyhow::anyhow!("Failed to send command: {}", e))
     }
 
     /// Get next command from input
-    pub async fn next_command(&mut self) -> Option<Commands> {
+    pub async fn next_command(&mut self) -> Option<InteractiveCommand> {
         if let Some(command_rx) = &mut self.command_rx {
             command_rx.recv().await
         } else {
@@ -67,39 +91,29 @@ impl CommandRouter {
     pub async fn process_cli_args(&self, cli: &Cli) -> Result<()> {
         debug!("Processing CLI arguments: {:?}", cli);
 
-        // Handle CLI commands
-        match &cli.command {
-            Commands::Subscribe { symbols } => {
-                self.send_command(Commands::Subscribe {
-                    symbols: symbols.clone(),
-                })?;
-            }
-            Commands::Unsubscribe { symbols } => {
-                self.send_command(Commands::Unsubscribe {
-                    symbols: symbols.clone(),
-                })?;
-            }
-            Commands::List => {
-                self.send_command(Commands::List)?;
-            }
-            Commands::Ui { simple } => {
-                self.send_command(Commands::Ui { simple: *simple })?;
-            }
-            Commands::Status => {
-                self.send_command(Commands::Status)?;
-            }
-            Commands::Show { symbol } => {
-                self.send_command(Commands::Show {
-                    symbol: symbol.clone(),
-                })?;
-            }
+        // For interactive mode, we don't need to process CLI args
+        // All commands will be handled through interactive input
+        if cli.is_interactive_mode() {
+            info!("Starting in interactive mode - commands will be processed interactively");
+            return Ok(());
+        }
+
+        // Handle non-interactive commands (should only be config/demo)
+        match &cli.command() {
             Commands::Config { action } => {
-                self.send_command(Commands::Config {
-                    action: action.as_ref().cloned(),
-                })?;
+                // Config command is handled directly in main.rs
+                info!("Config command handled directly in main.rs");
             }
             Commands::Demo => {
-                self.send_command(Commands::Demo)?;
+                // Demo command is handled directly in main.rs
+                info!("Demo command handled directly in main.rs");
+            }
+            _ => {
+                // This should not happen - only config/demo should be available
+                warn!(
+                    "Unexpected command in non-interactive mode: {:?}",
+                    cli.command()
+                );
             }
         }
 
@@ -107,7 +121,7 @@ impl CommandRouter {
     }
 
     /// Parse interactive command from string input
-    pub fn parse_interactive_command(&self, input: &str) -> Result<Option<Commands>> {
+    pub fn parse_interactive_command(&self, input: &str) -> Result<Option<InteractiveCommand>> {
         let input = input.trim();
 
         if input.is_empty() {
@@ -117,39 +131,39 @@ impl CommandRouter {
         let parts: Vec<&str> = input.split_whitespace().collect();
 
         match parts[0] {
-            "add" | "subscribe" => {
+            "/add" => {
                 if parts.len() < 2 {
                     return Err(anyhow::anyhow!("Usage: add <symbol1> [symbol2] ..."));
                 }
                 let symbols = parts[1..].iter().map(|s| s.to_string()).collect();
-                Ok(Some(Commands::Subscribe { symbols }))
+                Ok(Some(InteractiveCommand::Add { symbols }))
             }
-            "remove" | "unsubscribe" => {
+            "/remove" => {
                 if parts.len() < 2 {
                     return Err(anyhow::anyhow!("Usage: remove <symbol1> [symbol2] ..."));
                 }
                 let symbols = parts[1..].iter().map(|s| s.to_string()).collect();
-                Ok(Some(Commands::Unsubscribe { symbols }))
+                Ok(Some(InteractiveCommand::Remove { symbols }))
             }
-            "list" | "pairs" => Ok(Some(Commands::List)),
-            "focus" => {
+            "/list" | "pairs" => Ok(Some(InteractiveCommand::List)),
+            "/show" => {
                 if parts.len() < 2 {
                     return Err(anyhow::anyhow!("Usage: focus <symbol>"));
                 }
-                Ok(Some(Commands::Show {
+                Ok(Some(InteractiveCommand::Show {
                     symbol: parts[1].to_string(),
                 }))
             }
-            "stats" => Ok(Some(Commands::Status)),
-            "config" => {
+            "/status" => Ok(Some(InteractiveCommand::Status)),
+            "/config" => {
                 if parts.len() == 1 {
-                    Ok(Some(Commands::Config { action: None }))
+                    Ok(Some(InteractiveCommand::Config { action: None }))
                 } else if parts.len() == 2 && parts[1] == "show" {
-                    Ok(Some(Commands::Config {
+                    Ok(Some(InteractiveCommand::Config {
                         action: Some(crate::cli::ConfigAction::Show),
                     }))
                 } else if parts.len() == 2 && parts[1] == "reset" {
-                    Ok(Some(Commands::Config {
+                    Ok(Some(InteractiveCommand::Config {
                         action: Some(crate::cli::ConfigAction::Reset),
                     }))
                 } else if parts.len() >= 3 && parts[1] == "set" {
@@ -159,7 +173,7 @@ impl CommandRouter {
                     } else {
                         "".to_string()
                     };
-                    Ok(Some(Commands::Config {
+                    Ok(Some(InteractiveCommand::Config {
                         action: Some(crate::cli::ConfigAction::Set { key, value }),
                     }))
                 } else {
@@ -168,13 +182,12 @@ impl CommandRouter {
                     ))
                 }
             }
-            "help" | "?" => {
+            "/help" | "?" => {
                 self.show_help();
                 Ok(None)
             }
-            "quit" | "exit" | "q" => {
-                Ok(Some(Commands::Ui { simple: true })) // Use UI command as shutdown signal
-            }
+            "/logs" => Ok(Some(InteractiveCommand::Logs)),
+            "/quit" | "/exit" | "/q" => Ok(Some(InteractiveCommand::Quit)),
             _ => Err(anyhow::anyhow!(
                 "Unknown command: {}. Type 'help' for available commands.",
                 parts[0]
@@ -185,14 +198,15 @@ impl CommandRouter {
     /// Show interactive command help
     fn show_help(&self) {
         println!("\nXTrade Interactive Commands:");
-        println!("  add <symbol1> [symbol2] ...  - Subscribe to symbols");
-        println!("  remove <symbol1> [symbol2] ... - Unsubscribe from symbols");
-        println!("  list                         - Show current subscriptions");
-        println!("  focus <symbol>               - Show details for symbol");
-        println!("  stats                        - Show session statistics");
-        println!("  config [show|set|reset]      - Configuration management");
-        println!("  help                         - Show this help");
-        println!("  quit                         - Exit the application");
+        println!("  /add <symbol1> [symbol2] ...  - Subscribe to symbols");
+        println!("  /remove <symbol1> [symbol2] ... - Unsubscribe from symbols");
+        println!("  /list                         - Show current subscriptions");
+        println!("  /show  <symbol>               - Show details for symbol");
+        println!("  /status                       - Show session statistics");
+        println!("  /logs                         - Show recent logs");
+        println!("  /config [show|set|reset]      - Configuration management");
+        println!("  /help                         - Show this help");
+        println!("  /quit                         - Exit the application");
         println!();
     }
 
@@ -202,7 +216,7 @@ impl CommandRouter {
     }
 
     /// Get command sender for external use
-    pub fn command_sender(&self) -> mpsc::UnboundedSender<Commands> {
+    pub fn command_sender(&self) -> mpsc::UnboundedSender<InteractiveCommand> {
         self.command_tx.clone()
     }
 }

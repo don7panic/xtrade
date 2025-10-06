@@ -4,14 +4,14 @@
 
 use clap::{Parser, Subcommand};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "xtrade")]
 #[command(about = "XTrade Market Data Monitor")]
 #[command(long_about = "A high-performance cryptocurrency market data monitoring system")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     /// Configuration file path
     #[arg(long, default_value = "config.toml")]
@@ -26,37 +26,18 @@ pub struct Cli {
     pub verbose: bool,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
-    /// Subscribe to market data for specified symbols
-    Subscribe {
-        /// Trading symbols (e.g., BTC-USDT,ETH-USDT)
-        symbols: Vec<String>,
-    },
-
-    /// Unsubscribe from market data for specified symbols  
-    Unsubscribe {
-        /// Trading symbols to unsubscribe from
-        symbols: Vec<String>,
-    },
-
-    /// List currently subscribed symbols
-    List,
-
-    /// Start TUI (Terminal User Interface)
-    Ui {
+    /// Start interactive terminal session
+    #[command(hide = true)]
+    Interactive {
         /// Use simple CLI output instead of full TUI
         #[arg(long)]
         simple: bool,
-    },
 
-    /// Show connection status and metrics
-    Status,
-
-    /// Show detailed information for a specific symbol
-    Show {
-        /// Trading symbol to display
-        symbol: String,
+        /// Dry-run mode: show welcome page and configuration without starting UI
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Configuration management
@@ -67,6 +48,15 @@ pub enum Commands {
 
     /// Demo WebSocket functionality (for testing)
     Demo,
+}
+
+impl Default for Commands {
+    fn default() -> Self {
+        Commands::Interactive {
+            simple: false,
+            dry_run: false,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -92,6 +82,16 @@ impl Cli {
         Self::parse()
     }
 
+    /// Get the actual command, using default if none provided
+    pub fn command(&self) -> Commands {
+        self.command.clone().unwrap_or_default()
+    }
+
+    /// Check if we're running in interactive mode
+    pub fn is_interactive_mode(&self) -> bool {
+        matches!(self.command(), Commands::Interactive { .. })
+    }
+
     /// Adjust log level based on verbose flag
     pub fn effective_log_level(&self) -> String {
         if self.verbose {
@@ -99,35 +99,5 @@ impl Cli {
         } else {
             self.log_level.clone()
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cli_parsing() {
-        // Test basic command parsing
-        let cli = Cli::try_parse_from(["xtrade", "list"]).unwrap();
-        matches!(cli.command, Commands::List);
-    }
-
-    #[test]
-    fn test_subscribe_command() {
-        let cli = Cli::try_parse_from(["xtrade", "subscribe", "BTC-USDT", "ETH-USDT"]).unwrap();
-        match cli.command {
-            Commands::Subscribe { symbols } => {
-                assert_eq!(symbols, vec!["BTC-USDT", "ETH-USDT"]);
-            }
-            _ => panic!("Expected Subscribe command"),
-        }
-    }
-
-    #[test]
-    fn test_verbose_flag() {
-        let cli = Cli::try_parse_from(["xtrade", "--verbose", "status"]).unwrap();
-        assert!(cli.verbose);
-        assert_eq!(cli.effective_log_level(), "debug");
     }
 }

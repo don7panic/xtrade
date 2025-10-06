@@ -51,7 +51,30 @@ impl SymbolSubscription {
         // Connect to WebSocket
         if let Err(e) = self.ws.connect().await {
             error!("Failed to connect WebSocket for {}: {}", self.symbol, e);
+
+            // Send connection error event
+            if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+                symbol: self.symbol.clone(),
+                status: crate::binance::types::ConnectionStatus::Disconnected,
+            }) {
+                error!(
+                    "Failed to send connection status event for {}: {}",
+                    self.symbol, e
+                );
+            }
+
             return Err(e);
+        }
+
+        // Send connection established event
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Connected,
+        }) {
+            error!(
+                "Failed to send connection status event for {}: {}",
+                self.symbol, e
+            );
         }
 
         // Start listening for messages
@@ -98,6 +121,18 @@ impl SymbolSubscription {
         }
 
         info!("Successfully initialized subscription for: {}", self.symbol);
+
+        // Send subscription active event
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Connected,
+        }) {
+            error!(
+                "Failed to send connection status event for {}: {}",
+                self.symbol, e
+            );
+        }
+
         Ok(())
     }
 
@@ -217,6 +252,17 @@ impl SymbolSubscription {
     async fn reconnect(&mut self) -> Result<()> {
         info!("Reconnecting WebSocket for: {}", self.symbol);
 
+        // Send reconnecting status
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Reconnecting,
+        }) {
+            error!(
+                "Failed to send reconnection status event for {}: {}",
+                self.symbol, e
+            );
+        }
+
         // Disconnect first
         if let Err(e) = self.ws.disconnect().await {
             warn!(
@@ -228,7 +274,32 @@ impl SymbolSubscription {
         // Reconnect
         if let Err(e) = self.ws.connect().await {
             error!("Failed to reconnect WebSocket for {}: {}", self.symbol, e);
+
+            // Send connection failed event
+            if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+                symbol: self.symbol.clone(),
+                status: crate::binance::types::ConnectionStatus::Error(
+                    "Reconnection failed".to_string(),
+                ),
+            }) {
+                error!(
+                    "Failed to send connection failed event for {}: {}",
+                    self.symbol, e
+                );
+            }
+
             return Err(e);
+        }
+
+        // Send connection reestablished event
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Connected,
+        }) {
+            error!(
+                "Failed to send connection status event for {}: {}",
+                self.symbol, e
+            );
         }
 
         // Resubscribe
@@ -264,6 +335,17 @@ impl SymbolSubscription {
                         self.symbol, e
                     );
                 }
+
+                // Send active status
+                if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+                    symbol: self.symbol.clone(),
+                    status: crate::binance::types::ConnectionStatus::Connected,
+                }) {
+                    error!(
+                        "Failed to send active status event for {}: {}",
+                        self.symbol, e
+                    );
+                }
             }
             Err(e) => {
                 error!(
@@ -292,10 +374,32 @@ impl SymbolSubscription {
     pub async fn shutdown(self) -> Result<()> {
         info!("Shutting down subscription for: {}", self.symbol);
 
+        // Send disconnecting status
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Disconnected,
+        }) {
+            error!(
+                "Failed to send disconnecting status event for {}: {}",
+                self.symbol, e
+            );
+        }
+
         // Disconnect WebSocket
         if let Err(e) = self.ws.disconnect().await {
             warn!(
                 "Error during WebSocket disconnect for {}: {}",
+                self.symbol, e
+            );
+        }
+
+        // Send disconnected status
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Disconnected,
+        }) {
+            error!(
+                "Failed to send disconnected status event for {}: {}",
                 self.symbol, e
             );
         }

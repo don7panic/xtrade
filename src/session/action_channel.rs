@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, error};
 
 use crate::config::Config;
 use crate::market_data::MarketEvent;
+use crate::session::command_router::InteractiveCommand;
 
 /// Session events for communication between components
 #[derive(Debug, Clone)]
@@ -39,8 +39,12 @@ pub enum SessionEvent {
     DemoStarted,
     /// Demo completed
     DemoCompleted,
+    /// Logs information
+    LogsInfo { info: LogsInfo },
     /// Market data event
     MarketEvent(MarketEvent),
+    /// User command from interactive input
+    UserCommand { command: InteractiveCommand },
 }
 
 /// Status information for session
@@ -51,6 +55,14 @@ pub struct StatusInfo {
     pub active_subscriptions: usize,
     pub symbols: Vec<String>,
     pub session_stats: super::session_manager::SessionStats,
+}
+
+/// Logs information for session
+#[derive(Debug, Clone)]
+pub struct LogsInfo {
+    pub recent_logs: Vec<String>,
+    pub log_file_path: String,
+    pub log_level: String,
 }
 
 /// Action channel for event processing
