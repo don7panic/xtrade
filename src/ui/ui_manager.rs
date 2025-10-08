@@ -6,9 +6,12 @@ use tokio::io::{self, AsyncBufReadExt};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info};
 
+use crate::cli::Cli;
+use crate::config::Config;
 use crate::market_data::MarketDataManager;
 use crate::market_data::MarketEvent;
 use crate::session::action_channel::{SessionEvent, StatusInfo};
+use crate::session::session_manager::SessionStats;
 
 use super::AppState;
 
@@ -103,7 +106,10 @@ impl UIManager {
 
         // Handle dry-run mode
         if self.dry_run {
-            return self.run_dry_run().await;
+            // For internal UI manager dry-run mode, use default CLI and config
+            let cli = crate::cli::Cli::parse_args();
+            let config = crate::config::Config::default();
+            return self.run_dry_run(&cli, &config).await;
         }
 
         // Initialize UI components
@@ -117,14 +123,17 @@ impl UIManager {
     }
 
     /// Run in dry-run mode (show welcome page and configuration)
-    async fn run_dry_run(&mut self) -> Result<()> {
+    pub async fn run_dry_run(&mut self, cli: &Cli, config: &Config) -> Result<()> {
         info!("Running UI in dry-run mode");
 
         // Display welcome page
         self.display_welcome_page().await?;
 
-        // Display configuration
-        self.display_configuration().await?;
+        // Display configuration with actual data
+        self.display_configuration_with_data(config).await?;
+
+        // Display dry-run configuration
+        self.display_dry_run_config(cli).await?;
 
         info!("Dry-run mode completed");
         Ok(())
@@ -132,63 +141,58 @@ impl UIManager {
 
     /// Display welcome page
     async fn display_welcome_page(&mut self) -> Result<()> {
-        println!();
-        println!("┌─ XTrade Market Data Monitor ────────────────────────────────────────┐");
-        println!("│                                                                     │");
-        println!("│                      * Welcome to XTrade! *                         │");
-        println!("│                                                                     │");
-        println!("│   A high-performance cryptocurrency market data monitoring system   │");
-        println!("│                                                                     │");
-        println!("│   Version: {:<50} │", env!("CARGO_PKG_VERSION"));
-        println!(
-            "│   Rust: {:<50} │",
-            std::env::var("RUSTC_VERSION").unwrap_or("unknown".to_string())
-        );
-        println!("│                                                                     │");
-        println!("│   Features:                                                        │");
-        println!("│   • Real-time Binance market data                                  │");
-        println!("│   • OrderBook visualization                                        │");
-        println!("│   • Multi-symbol monitoring                                        │");
-        println!("│   • Performance metrics tracking                                    │");
-        println!("│                                                                     │");
-        println!("│   Commands:                                                        │");
-        println!("│   • /add <symbols> - Subscribe to symbols                   │");
-        println!("│   • /remove <symbols> - Unsubscribe from symbols             │");
-        println!("│   • /pairs - Show current subscriptions                       │");
-        println!("│   • /show <symbol> - Show details for symbol                │");
-        println!("│   • /status - Show session statistics                         │");
-        println!("│   • /logs - Show recent logs                                 │");
-        println!("│   • /config show - Show configuration                        │");
-        println!("│                                                                     │");
-        println!("└────────────────────────────────────────────────────────────────────┘");
-        println!();
+        crate::ui::display_welcome_page().map_err(|e| anyhow::anyhow!(e))
+    }
 
+    /// Display dry-run configuration
+    pub async fn display_dry_run_config(&self, cli: &Cli) -> Result<()> {
+        println!("\nDry-run mode configuration:");
+        println!("Config file: {}", cli.config_file);
+        println!("Log level: {}", cli.effective_log_level());
+        println!("Configuration loaded successfully");
         Ok(())
     }
 
-    /// Display configuration
-    async fn display_configuration(&mut self) -> Result<()> {
+    /// Display configuration with actual config data
+    pub async fn display_configuration_with_data(&self, config: &Config) -> Result<()> {
         println!("┌─ Configuration Overview ───────────────────────────────────────────┐");
         println!("│                                                                     │");
         println!("│   Configuration loaded successfully!                               │");
         println!("│                                                                     │");
-        println!("│   Default symbols: BTCUSDT                                          │");
-        println!("│   Refresh rate: 100ms                                               │");
-        println!("│   OrderBook depth: 20 levels                                        │");
-        println!("│   Log level: info                                                   │");
+        println!("│   Default symbols: {:<40} │", config.symbols.join(", "));
+        println!(
+            "│   Refresh rate: {}ms                                               │",
+            config.refresh_rate_ms
+        );
+        println!(
+            "│   OrderBook depth: {} levels                                        │",
+            config.orderbook_depth
+        );
+        println!("│   Log level: {:<50} │", config.log_level);
         println!("│                                                                     │");
         println!("│   Binance API:                                                     │");
-        println!("│   • WebSocket: wss://stream.binance.com:9443                       │");
-        println!("│   • REST API: https://api.binance.com                               │");
+        println!("│   • WebSocket: {:<50} │", config.binance.ws_url);
+        println!("│   • REST API: {:<50} │", config.binance.rest_url);
         println!("│                                                                     │");
         println!("│   UI Settings:                                                     │");
-        println!("│   • Colors: enabled                                                 │");
-        println!("│   • Update rate: 20 FPS                                             │");
-        println!("│   • Sparkline points: 60                                            │");
+        println!(
+            "│   • Colors: {:<50} │",
+            if config.ui.enable_colors {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!(
+            "│   • Update rate: {} FPS                                             │",
+            config.ui.update_rate_fps
+        );
+        println!(
+            "│   • Sparkline points: {:<40} │",
+            config.ui.sparkline_points
+        );
         println!("│                                                                     │");
         println!("└────────────────────────────────────────────────────────────────────┘");
-        println!();
-        println!("Dry-run mode completed. Use 'xtrade ui' to start the full interface.");
         println!();
 
         Ok(())
@@ -293,36 +297,13 @@ impl UIManager {
 
     /// Render simple CLI output (placeholder for TUI)
     async fn render_cli_output(&mut self) -> Result<()> {
-        println!("\n┌─ XTrade Market Data Monitor ──────────────────────────────────────┐");
-
-        // Show symbols
-        if self.app_state.symbols.is_empty() {
-            println!("│ No active subscriptions");
-        } else {
-            let symbols_str = self.app_state.symbols.join(" ");
-            println!("│ Symbols: {}", symbols_str);
-        }
-
-        // Show status
-        println!(
-            "│ Status: Running | Render count: {}",
-            self.render_state.render_count
-        );
-
-        // Show error/info messages
-        if let Some(error) = &self.render_state.error_message {
-            println!("│ Error: {}", error);
-        }
-
-        if let Some(info) = &self.render_state.info_message {
-            println!("│ Info: {}", info);
-        }
-
-        println!("│");
-        println!(
-            "│ Commands: add <symbol> | remove <symbol> | pairs | focus <symbol> | stats | logs | quit"
-        );
-        println!("└────────────────────────────────────────────────────────────────────┘");
+        // Use the new CLI rendering functions for consistent formatting
+        crate::ui::cli::render_cli_dashboard(
+            &self.app_state,
+            &self.render_state,
+            SessionStats::default(),
+        )
+        .map_err(|e| anyhow::anyhow!("CLI rendering error: {}", e))?;
 
         Ok(())
     }

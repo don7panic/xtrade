@@ -27,7 +27,7 @@
   - **Binance Adapter 基础**：使用 `tokio-tungstenite` 建立连接、解析合并流消息容器；构建 `reqwest` REST 快照获取。
   - **观测铺底**：定义核心结构体（`PriceTick`, `OrderBook`, `ConnectionMetrics`），预留 metrics 埋点接口。
 - **交付检查**：
-  - `cargo run -- ui --dry-run` 展示欢迎页 + 配置内容。
+  - `cargo run -- --dry-run` 展示欢迎页 + 配置内容。
   - 单交易对连接成功（日志展示原始 tick），连接状态可追踪。
   - `make fmt`, `cargo clippy -- -D warnings` 通过。
 

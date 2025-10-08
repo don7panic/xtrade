@@ -4,6 +4,7 @@
 
 use super::{AppState, MarketDataState};
 use crate::AppResult;
+use crate::session::session_manager::SessionStats;
 
 /// Display market data in simple CLI format
 pub fn display_market_data(symbol: &str, data: &MarketDataState) -> AppResult<()> {
@@ -54,6 +55,70 @@ pub fn display_symbol_list(symbols: &[String]) -> AppResult<()> {
             println!("   {}. {}", i + 1, symbol);
         }
     }
+
+    Ok(())
+}
+
+/// Render CLI dashboard with consistent formatting matching welcome page
+pub fn render_cli_dashboard(
+    app_state: &AppState,
+    render_state: &crate::ui::ui_manager::RenderState,
+    session_stats: SessionStats,
+) -> AppResult<()> {
+    println!();
+    println!("┌─ XTrade Market Data Monitor ────────────────────────────────────────┐");
+    println!("│                                                                     │");
+
+    // Render symbols section
+    if app_state.symbols.is_empty() {
+        println!("│   Active Subscriptions: None                                         │");
+    } else {
+        let symbols_str = app_state.symbols.join(", ");
+        println!("│   Active Subscriptions: {:<50} │", symbols_str);
+    }
+    println!("│                                                                     │");
+
+    // Render status section
+    println!(
+        "│   Status: Running | Render count: {:<35} │",
+        render_state.render_count
+    );
+    println!(
+        "│   Commands processed: {:<45} │",
+        session_stats.commands_processed
+    );
+    println!(
+        "│   Events processed: {:<46} │",
+        session_stats.events_processed
+    );
+    println!("│                                                                     │");
+
+    // Render messages section
+    if let Some(error) = &render_state.error_message {
+        println!("│   Error: {:<58} │", error);
+    }
+
+    if let Some(info) = &render_state.info_message {
+        println!("│   Info: {:<59} │", info);
+    }
+
+    if render_state.error_message.is_some() || render_state.info_message.is_some() {
+        println!("│                                                                     │");
+    }
+
+    // Render commands section
+    println!("│   Commands:                                                        │");
+    println!("│   • /add <symbols> - Subscribe to symbols                          │");
+    println!("│   • /remove <symbols> - Unsubscribe from symbols                   │");
+    println!("│   • /list - Show current subscriptions                              │");
+    println!("│   • /show <symbol> - Show details for symbol                        │");
+    println!("│   • /status - Show session statistics                               │");
+    println!("│   • /logs - Show recent logs                                        │");
+    println!("│   • /config show - Show configuration                               │");
+    println!("│   • /quit - Exit the application                                    │");
+    println!("│                                                                     │");
+    println!("└────────────────────────────────────────────────────────────────────┘");
+    println!();
 
     Ok(())
 }

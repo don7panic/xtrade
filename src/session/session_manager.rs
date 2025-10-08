@@ -142,13 +142,6 @@ impl SessionManager {
     pub async fn initialize(&mut self) -> Result<()> {
         info!("Initializing interactive session");
 
-        // Check if we're in dry-run mode
-        if let crate::cli::Commands::Interactive { dry_run: true, .. } = &self.cli.command() {
-            info!("Running in dry-run mode - skipping full initialization");
-            self.state = SessionState::Running;
-            return Ok(());
-        }
-
         // Initialize UI manager if enabled
         if self.config.enable_tui {
             self.initialize_ui().await?;
@@ -168,6 +161,42 @@ impl SessionManager {
         info!("Session initialized successfully");
 
         Ok(())
+    }
+
+    /// Start the session using the appropriate execution mode
+    pub async fn start(&mut self) -> Result<()> {
+        if self.cli.is_dry_run_mode() {
+            return self.run_dry_run_mode().await;
+        }
+
+        self.initialize().await?;
+
+        self.run().await
+    }
+
+    async fn run_dry_run_mode(&mut self) -> Result<()> {
+        info!("Running in dry-run mode - showing welcome page and configuration");
+
+        self.state = SessionState::Running;
+
+        self.display_welcome_page().await?;
+        self.print_dry_run_summary()?;
+
+        info!("Dry-run mode completed");
+        Ok(())
+    }
+
+    fn print_dry_run_summary(&self) -> Result<()> {
+        println!();
+        println!("Dry-run mode configuration:");
+        println!("Config file: {}", self.cli.config_file);
+        println!("Log level: {}", self.cli.effective_log_level());
+        self.app_config.display_summary()
+    }
+
+    /// Display welcome page for interactive mode
+    pub async fn display_welcome_page(&mut self) -> Result<()> {
+        crate::ui::display_welcome_page().map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Initialize UI manager
@@ -232,54 +261,8 @@ impl SessionManager {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting interactive session loop");
 
-        // Check if we're in dry-run mode
-        if let crate::cli::Commands::Interactive { dry_run: true, .. } = &self.cli.command() {
-            info!("Running in dry-run mode - processing CLI command directly");
-
-            // Process the CLI command directly
-            self.command_router.process_cli_args(&self.cli).await?;
-
-            // Run the session loop once to process the command
-            let mut shutdown_rx = self.shutdown_rx.take().unwrap();
-
-            while self.state != SessionState::Terminated {
-                tokio::select! {
-                    // Handle shutdown signal
-                    _ = shutdown_rx.recv() => {
-                        info!("Received shutdown signal");
-                        self.shutdown().await?;
-                    }
-
-                    // Handle commands from command router
-                    Some(command) = self.command_router.next_command() => {
-                        self.handle_command(command).await?;
-                    }
-
-                    // Handle events from action channel
-                    Some(event) = self.action_channel.next_event() => {
-                        self.handle_event(event).await?;
-                    }
-
-                    // Session timeout check
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        self.check_timeout().await?;
-                    }
-                }
-
-                // Handle market events separately to avoid borrowing conflicts
-                let market_event = {
-                    let mut market_manager = self.market_manager.lock().await;
-                    market_manager.next_event().await
-                };
-
-                if let Some(market_event) = market_event {
-                    self.handle_market_event(market_event).await?;
-                }
-            }
-
-            info!("Dry-run session loop terminated");
-            return Ok(());
-        }
+        // Display welcome page
+        self.display_welcome_page().await?;
 
         // Start UI if enabled
         if let Some(ui_manager) = &self.ui_manager {
@@ -424,46 +407,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Handle UI command
-    async fn handle_ui(&mut self, simple: bool, dry_run: bool) -> Result<()> {
-        if dry_run {
-            info!("Running UI in dry-run mode");
-
-            // Create UI manager with dry-run mode
-            let ui_manager = UIManager::new_with_dry_run(
-                self.market_manager.clone(),
-                self.action_channel.event_tx(),
-            );
-
-            // Run dry-run mode
-            let ui_manager = Arc::new(Mutex::new(ui_manager));
-            ui_manager.lock().await.run().await?;
-
-            // After dry-run mode completes, shut down the session
-            self.shutdown().await?;
-            return Ok(());
-        }
-
-        if simple {
-            info!("Switching to simple CLI mode");
-            self.config.enable_tui = false;
-        } else {
-            info!("Switching to TUI mode");
-            self.config.enable_tui = true;
-
-            if self.ui_manager.is_none() {
-                self.initialize_ui().await?;
-            }
-        }
-
-        self.action_channel
-            .send_event(super::action_channel::SessionEvent::UIModeChanged {
-                enable_tui: self.config.enable_tui,
-            })?;
-
-        Ok(())
-    }
-
     /// Handle status command
     async fn handle_status(&mut self) -> Result<()> {
         let manager = self.market_manager.lock().await;
@@ -532,24 +475,6 @@ impl SessionManager {
                     .send_event(super::action_channel::SessionEvent::ConfigHelp)?;
             }
         }
-
-        Ok(())
-    }
-
-    /// Handle demo command
-    async fn handle_demo(&mut self) -> Result<()> {
-        info!("Starting demo mode");
-
-        self.action_channel
-            .send_event(super::action_channel::SessionEvent::DemoStarted)?;
-
-        // Start demo WebSocket
-        if let Err(e) = crate::binance::demo::demo_websocket().await {
-            error!("Demo WebSocket error: {}", e);
-        }
-
-        self.action_channel
-            .send_event(super::action_channel::SessionEvent::DemoCompleted)?;
 
         Ok(())
     }

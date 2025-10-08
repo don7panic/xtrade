@@ -29,7 +29,7 @@
   - 准备 `metrics` 埋点接口、延迟时间戳记录器、基础结构体定义。
   - 为后续测试搭建 wiremock/fixtures 框架。
 - **里程碑验收**
-  - `cargo run -- ui --dry-run` 启动展示欢迎页 + 配置读取结果。
+  - `cargo run -- --dry-run` 启动展示欢迎页 + 配置读取结果。
   - 成功连接单个交易对（输出原始 tick 到日志），记录连接状态。
   - CI 通过 `make fmt`, `cargo clippy -- -D warnings`。
 
