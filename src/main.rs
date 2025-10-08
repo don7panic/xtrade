@@ -21,7 +21,7 @@ async fn main() -> AppResult<()> {
     let command = &cli.command();
     match command {
         Commands::Config { action } => {
-            Config::handle_command(&action)?;
+            Config::handle_command(action)?;
             Ok(())
         }
         Commands::Demo => demo::demo_websocket().await,

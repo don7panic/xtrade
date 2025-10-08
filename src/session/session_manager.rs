@@ -11,7 +11,7 @@ use crate::market_data::MarketDataManager;
 use crate::metrics::MetricsCollector;
 use crate::ui::ui_manager::UIManager;
 
-use super::action_channel::ActionChannel;
+use super::action_channel::{ActionChannel, SessionEvent};
 use super::command_router::{CommandRouter, InteractiveCommand};
 
 /// Session state tracking
@@ -83,8 +83,10 @@ pub struct SessionManager {
     stats: SessionStats,
     /// Market data manager
     market_manager: Arc<Mutex<MarketDataManager>>,
-    /// UI manager (optional)
-    ui_manager: Option<Arc<Mutex<UIManager>>>,
+    /// UI task handle (optional)
+    ui_task: Option<tokio::task::JoinHandle<()>>,
+    /// UI event sender (Session -> UI)
+    ui_event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
     /// Metrics collector (optional)
     metrics_collector: Option<Arc<Mutex<MetricsCollector>>>,
     /// Command router
@@ -129,7 +131,8 @@ impl SessionManager {
             state: SessionState::Starting,
             stats: SessionStats::default(),
             market_manager,
-            ui_manager: None,
+            ui_task: None,
+            ui_event_tx: None,
             metrics_collector: None,
             command_router,
             action_channel,
@@ -203,28 +206,21 @@ impl SessionManager {
     async fn initialize_ui(&mut self) -> Result<()> {
         info!("Initializing UI manager");
 
-        let ui_manager =
+        let mut ui_manager =
             UIManager::new(self.market_manager.clone(), self.action_channel.event_tx());
 
         // Get UI event sender for forwarding events
-        let ui_event_tx = ui_manager.ui_event_tx();
+        let ui_event_tx = ui_manager.ui_event_sender();
 
-        // Store UI manager
-        self.ui_manager = Some(Arc::new(Mutex::new(ui_manager)));
+        // Store UI event sender
+        self.ui_event_tx = Some(ui_event_tx);
 
-        // Forward session events to UI
-        let ui_event_tx_clone = ui_event_tx.clone();
-        let mut action_channel = self.action_channel.clone();
-
-        tokio::spawn(async move {
-            if let Some(mut event_rx) = action_channel.event_rx() {
-                while let Some(event) = event_rx.recv().await {
-                    if let Err(e) = ui_event_tx_clone.send(event) {
-                        error!("Failed to forward event to UI: {}", e);
-                    }
-                }
+        // Spawn UI task
+        self.ui_task = Some(tokio::spawn(async move {
+            if let Err(e) = ui_manager.run().await {
+                error!("UI manager error: {}", e);
             }
-        });
+        }));
 
         Ok(())
     }
@@ -264,16 +260,6 @@ impl SessionManager {
         // Display welcome page
         self.display_welcome_page().await?;
 
-        // Start UI if enabled
-        if let Some(ui_manager) = &self.ui_manager {
-            let ui_manager = ui_manager.clone();
-            tokio::spawn(async move {
-                if let Err(e) = ui_manager.lock().await.run().await {
-                    error!("UI manager error: {}", e);
-                }
-            });
-        }
-
         // Start metrics collection if enabled
         if let Some(metrics_collector) = &self.metrics_collector {
             let metrics_collector = metrics_collector.clone();
@@ -300,7 +286,7 @@ impl SessionManager {
                     self.handle_command(command).await?;
                 }
 
-                // Handle events from action channel
+                // Handle events from action channel (including user commands)
                 Some(event) = self.action_channel.next_event() => {
                     self.handle_event(event).await?;
                 }
@@ -352,16 +338,14 @@ impl SessionManager {
             match manager.subscribe(symbol.clone()).await {
                 Ok(()) => {
                     info!("Subscribed to symbol: {}", symbol);
-                    self.action_channel.send_event(
-                        super::action_channel::SessionEvent::SubscriptionAdded { symbol },
-                    )?;
+                    self.action_channel
+                        .send_event(SessionEvent::SubscriptionAdded { symbol })?;
                 }
                 Err(e) => {
                     error!("Failed to subscribe to {}: {}", symbol, e);
-                    self.action_channel
-                        .send_event(super::action_channel::SessionEvent::Error {
-                            message: format!("Failed to subscribe to {}: {}", symbol, e),
-                        })?;
+                    self.action_channel.send_event(SessionEvent::Error {
+                        message: format!("Failed to subscribe to {}: {}", symbol, e),
+                    })?;
                 }
             }
         }
@@ -377,16 +361,14 @@ impl SessionManager {
             match manager.unsubscribe(&symbol).await {
                 Ok(()) => {
                     info!("Unsubscribed from symbol: {}", symbol);
-                    self.action_channel.send_event(
-                        super::action_channel::SessionEvent::SubscriptionRemoved { symbol },
-                    )?;
+                    self.action_channel
+                        .send_event(SessionEvent::SubscriptionRemoved { symbol })?;
                 }
                 Err(e) => {
                     error!("Failed to unsubscribe from {}: {}", symbol, e);
-                    self.action_channel
-                        .send_event(super::action_channel::SessionEvent::Error {
-                            message: format!("Failed to unsubscribe from {}: {}", symbol, e),
-                        })?;
+                    self.action_channel.send_event(SessionEvent::Error {
+                        message: format!("Failed to unsubscribe from {}: {}", symbol, e),
+                    })?;
                 }
             }
         }
@@ -402,7 +384,7 @@ impl SessionManager {
         info!("Current subscriptions: {:?}", symbols);
 
         self.action_channel
-            .send_event(super::action_channel::SessionEvent::SubscriptionList { symbols })?;
+            .send_event(SessionEvent::SubscriptionList { symbols })?;
 
         Ok(())
     }
@@ -421,7 +403,7 @@ impl SessionManager {
         };
 
         self.action_channel
-            .send_event(super::action_channel::SessionEvent::StatusInfo { info: status_info })?;
+            .send_event(SessionEvent::StatusInfo { info: status_info })?;
 
         Ok(())
     }
@@ -432,13 +414,13 @@ impl SessionManager {
 
         if let Some(orderbook) = manager.get_orderbook(&symbol).await {
             self.action_channel
-                .send_event(super::action_channel::SessionEvent::SymbolDetails {
+                .send_event(SessionEvent::SymbolDetails {
                     symbol,
                     orderbook: Some(orderbook),
                 })?;
         } else {
             self.action_channel
-                .send_event(super::action_channel::SessionEvent::SymbolDetails {
+                .send_event(SessionEvent::SymbolDetails {
                     symbol,
                     orderbook: None,
                 })?;
@@ -451,28 +433,23 @@ impl SessionManager {
     async fn handle_config(&mut self, action: Option<crate::cli::ConfigAction>) -> Result<()> {
         match action {
             Some(crate::cli::ConfigAction::Show) => {
-                self.action_channel.send_event(
-                    super::action_channel::SessionEvent::ConfigInfo {
-                        config: self.app_config.clone(),
-                    },
-                )?;
+                self.action_channel.send_event(SessionEvent::ConfigInfo {
+                    config: self.app_config.clone(),
+                })?;
             }
             Some(crate::cli::ConfigAction::Set { key, value }) => {
                 warn!("Config set command not yet implemented: {}={}", key, value);
-                self.action_channel
-                    .send_event(super::action_channel::SessionEvent::Error {
-                        message: format!("Config set not implemented: {}={}", key, value),
-                    })?;
+                self.action_channel.send_event(SessionEvent::Error {
+                    message: format!("Config set not implemented: {}={}", key, value),
+                })?;
             }
             Some(crate::cli::ConfigAction::Reset) => {
                 self.app_config = Config::default();
                 info!("Configuration reset to defaults");
-                self.action_channel
-                    .send_event(super::action_channel::SessionEvent::ConfigReset)?;
+                self.action_channel.send_event(SessionEvent::ConfigReset)?;
             }
             None => {
-                self.action_channel
-                    .send_event(super::action_channel::SessionEvent::ConfigHelp)?;
+                self.action_channel.send_event(SessionEvent::ConfigHelp)?;
             }
         }
 
@@ -501,37 +478,48 @@ impl SessionManager {
         };
 
         self.action_channel
-            .send_event(super::action_channel::SessionEvent::LogsInfo { info: logs_info })?;
+            .send_event(SessionEvent::LogsInfo { info: logs_info })?;
 
         Ok(())
     }
 
     /// Handle session event
-    async fn handle_event(&mut self, event: super::action_channel::SessionEvent) -> Result<()> {
+    async fn handle_event(&mut self, event: SessionEvent) -> Result<()> {
         debug!("Handling session event: {:?}", event);
 
         self.stats.events_processed += 1;
 
         match event {
-            super::action_channel::SessionEvent::ShutdownRequested => {
+            SessionEvent::ShutdownRequested => {
+                self.forward_to_ui(SessionEvent::ShutdownRequested);
                 self.shutdown().await?;
             }
-            super::action_channel::SessionEvent::Error { message } => {
+            SessionEvent::Error { message } => {
                 error!("Session error: {}", message);
                 self.stats.errors_encountered += 1;
+                self.forward_to_ui(SessionEvent::Error { message });
             }
-            super::action_channel::SessionEvent::UserCommand { command } => {
+            SessionEvent::UserCommand { command } => {
                 self.handle_command(command).await?;
             }
-            _ => {
-                // Forward event to UI if available
-                if let Some(ui_manager) = &self.ui_manager {
-                    ui_manager.lock().await.handle_event(event).await?;
-                }
+            SessionEvent::MarketEvent(market_event) => {
+                self.handle_market_event(market_event).await?;
+            }
+            other => {
+                self.forward_to_ui(other);
             }
         }
 
         Ok(())
+    }
+
+    /// Forward an event to the UI if the channel is available
+    fn forward_to_ui(&self, event: SessionEvent) {
+        if let Some(ui_event_tx) = &self.ui_event_tx {
+            if let Err(e) = ui_event_tx.send(event) {
+                error!("Failed to forward event to UI: {}", e);
+            }
+        }
     }
 
     /// Handle market event
@@ -539,12 +527,10 @@ impl SessionManager {
         debug!("Handling market event: {:?}", event);
 
         // Forward to UI if available
-        if let Some(ui_manager) = &self.ui_manager {
-            ui_manager
-                .lock()
-                .await
-                .handle_market_event(event.clone())
-                .await?;
+        if let Some(ui_event_tx) = &self.ui_event_tx {
+            if let Err(e) = ui_event_tx.send(SessionEvent::MarketEvent(event.clone())) {
+                error!("Failed to send market event to UI: {}", e);
+            }
         }
 
         // Forward to metrics collector if available
@@ -585,9 +571,16 @@ impl SessionManager {
 
         self.state = SessionState::ShuttingDown;
 
-        // Shutdown UI manager
-        if let Some(ui_manager) = &self.ui_manager {
-            ui_manager.lock().await.shutdown().await?;
+        // Notify UI to shutdown and wait for task completion
+        if let Some(ui_event_tx) = self.ui_event_tx.take() {
+            if let Err(e) = ui_event_tx.send(SessionEvent::ShutdownRequested) {
+                error!("Failed to notify UI of shutdown: {}", e);
+            }
+        }
+        if let Some(ui_task) = self.ui_task.take() {
+            if let Err(e) = ui_task.await {
+                error!("UI task terminated with error: {}", e);
+            }
         }
 
         // Shutdown metrics collector

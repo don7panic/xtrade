@@ -19,8 +19,10 @@ use super::AppState;
 pub struct UIManager {
     /// Market data manager reference
     market_manager: Arc<Mutex<MarketDataManager>>,
-    /// Event sender for session events
-    event_tx: mpsc::UnboundedSender<SessionEvent>,
+    /// Event sender for session events (UI -> Session)
+    session_event_tx: mpsc::UnboundedSender<SessionEvent>,
+    /// Event sender for UI events (Session -> UI)
+    ui_event_tx: mpsc::UnboundedSender<SessionEvent>,
     /// Event receiver for UI events
     event_rx: Option<mpsc::UnboundedReceiver<SessionEvent>>,
     /// Market event receiver
@@ -61,15 +63,16 @@ impl UIManager {
     /// Create a new UIManager
     pub fn new(
         market_manager: Arc<Mutex<MarketDataManager>>,
-        event_tx: mpsc::UnboundedSender<SessionEvent>,
+        session_event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Self {
         // Create event channels
-        let (_ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
+        let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
         let (_market_event_tx, market_event_rx) = mpsc::unbounded_channel();
 
         Self {
             market_manager,
-            event_tx,
+            session_event_tx,
+            ui_event_tx,
             event_rx: Some(ui_event_rx),
             market_event_rx: Some(market_event_rx),
             app_state: AppState::new(Vec::new()),
@@ -81,16 +84,21 @@ impl UIManager {
     /// Create a new UIManager with dry-run mode
     pub fn new_with_dry_run(
         market_manager: Arc<Mutex<MarketDataManager>>,
-        event_tx: mpsc::UnboundedSender<SessionEvent>,
+        session_event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Self {
-        let mut ui_manager = Self::new(market_manager, event_tx);
+        let mut ui_manager = Self::new(market_manager, session_event_tx);
         ui_manager.dry_run = true;
         ui_manager
     }
 
-    /// Get UI event sender
-    pub fn ui_event_tx(&self) -> mpsc::UnboundedSender<SessionEvent> {
-        self.event_tx.clone()
+    /// Get session event sender (UI -> Session)
+    pub fn session_event_sender(&self) -> mpsc::UnboundedSender<SessionEvent> {
+        self.session_event_tx.clone()
+    }
+
+    /// Get UI event sender (Session -> UI)
+    pub fn ui_event_sender(&self) -> mpsc::UnboundedSender<SessionEvent> {
+        self.ui_event_tx.clone()
     }
 
     /// Get market event sender
@@ -358,7 +366,7 @@ impl UIManager {
                         // Handle quit command
                         info!("User requested quit");
                         self.render_state.should_quit = true;
-                        self.event_tx
+                        self.session_event_tx
                             .send(SessionEvent::ShutdownRequested)
                             .map_err(|e| {
                                 anyhow::anyhow!("Failed to send shutdown request: {}", e)
@@ -366,7 +374,7 @@ impl UIManager {
                     }
                     _ => {
                         // Forward other commands to session manager
-                        self.event_tx
+                        self.session_event_tx
                             .send(SessionEvent::UserCommand { command })
                             .map_err(|e| anyhow::anyhow!("Failed to send user command: {}", e))?;
                     }
@@ -388,6 +396,7 @@ impl UIManager {
     }
 
     /// Handle status command
+    #[allow(dead_code)]
     async fn handle_status_command(&mut self) -> Result<()> {
         let manager = self.market_manager.lock().await;
         let symbols = manager.list_subscriptions().await;
@@ -400,7 +409,7 @@ impl UIManager {
             session_stats: crate::session::session_manager::SessionStats::default(),
         };
 
-        self.event_tx
+        self.session_event_tx
             .send(SessionEvent::StatusInfo { info: status_info })
             .map_err(|e| anyhow::anyhow!("Failed to send status event: {}", e))?;
 
@@ -452,6 +461,9 @@ impl UIManager {
                     info.recent_logs.join(", ")
                 ));
                 self.render_state.should_redraw = true;
+            }
+            SessionEvent::MarketEvent(event) => {
+                self.handle_market_event(event).await?;
             }
             _ => {
                 debug!("Unhandled UI event: {:?}", event);
