@@ -35,6 +35,7 @@ pub enum InteractiveCommand {
 /// Command router for processing interactive commands
 pub struct CommandRouter {
     /// Market data manager reference
+    #[allow(dead_code)]
     market_manager: Arc<Mutex<MarketDataManager>>,
     /// Command input channel
     command_tx: mpsc::UnboundedSender<InteractiveCommand>,
@@ -100,7 +101,7 @@ impl CommandRouter {
 
         // Handle non-interactive commands (should only be config/demo)
         match &cli.command() {
-            Commands::Config { action } => {
+            Commands::Config { action: _ } => {
                 // Config command is handled directly in main.rs
                 info!("Config command handled directly in main.rs");
             }
