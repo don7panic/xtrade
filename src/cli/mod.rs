@@ -24,6 +24,10 @@ pub struct Cli {
     /// Enable verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Dry-run mode: show welcome page and configuration without starting UI
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -34,10 +38,6 @@ pub enum Commands {
         /// Use simple CLI output instead of full TUI
         #[arg(long)]
         simple: bool,
-
-        /// Dry-run mode: show welcome page and configuration without starting UI
-        #[arg(long)]
-        dry_run: bool,
     },
 
     /// Configuration management
@@ -52,10 +52,7 @@ pub enum Commands {
 
 impl Default for Commands {
     fn default() -> Self {
-        Commands::Interactive {
-            simple: false,
-            dry_run: false,
-        }
+        Commands::Interactive { simple: false }
     }
 }
 
@@ -99,5 +96,10 @@ impl Cli {
         } else {
             self.log_level.clone()
         }
+    }
+
+    /// Check if we're running in dry-run mode
+    pub fn is_dry_run_mode(&self) -> bool {
+        self.dry_run
     }
 }

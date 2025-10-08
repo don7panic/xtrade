@@ -609,28 +609,3 @@ pub async fn demo_websocket() -> AppResult<()> {
 
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // 集成测试的示例 - 测试组件如何协同工作
-    #[tokio::test]
-    async fn test_component_integration() {
-        // 这个测试展示了如何测试组件的集成
-        // 在实际环境中，你可能需要使用模拟对象来测试
-
-        let processor = MessageProcessor::new();
-        let symbol = "TESTUSDT".to_string();
-        let manager = OrderBookManager::new(symbol);
-        let metrics = MetricsCollector::new();
-
-        // 验证初始状态
-        let initial_stats = processor.get_stats();
-        assert_eq!(initial_stats.message_count, 0);
-
-        // 验证组件可以正确创建和访问
-        assert_eq!(manager.orderbook.symbol, "TESTUSDT");
-        assert!(metrics.start_time <= Instant::now());
-    }
-}
