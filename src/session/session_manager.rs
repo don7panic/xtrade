@@ -325,6 +325,7 @@ impl SessionManager {
             InteractiveCommand::Status => self.handle_status().await,
             InteractiveCommand::Show { symbol } => self.handle_show(symbol).await,
             InteractiveCommand::Config { action } => self.handle_config(action).await,
+            InteractiveCommand::Reconnect => self.handle_reconnect().await,
             InteractiveCommand::Quit => self.handle_quit().await,
             InteractiveCommand::Logs => self.handle_logs().await,
         }
@@ -370,6 +371,32 @@ impl SessionManager {
                         message: format!("Failed to unsubscribe from {}: {}", symbol, e),
                     })?;
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle reconnect command
+    async fn handle_reconnect(&mut self) -> Result<()> {
+        let reconnect_window = self.app_config.binance.reconnect_interval_ms;
+
+        let result = {
+            let mut manager = self.market_manager.lock().await;
+            manager.handle_reconnection(reconnect_window).await
+        };
+
+        match result {
+            Ok(()) => {
+                info!("Reconnect triggered for all active subscriptions");
+                // Provide latest status snapshot to UI/CLI
+                self.handle_status().await?;
+            }
+            Err(e) => {
+                error!("Failed to trigger reconnect workflow: {}", e);
+                self.action_channel.send_event(SessionEvent::Error {
+                    message: format!("Reconnect failed: {}", e),
+                })?;
             }
         }
 

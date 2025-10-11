@@ -113,6 +113,7 @@ pub fn render_cli_dashboard(
     println!("│   • /list - Show current subscriptions                              │");
     println!("│   • /show <symbol> - Show details for symbol                        │");
     println!("│   • /status - Show session statistics                               │");
+    println!("│   • /reconnect - Force reconnect for all subscriptions              │");
     println!("│   • /logs - Show recent logs                                        │");
     println!("│   • /config show - Show configuration                               │");
     println!("│   • /quit - Exit the application                                    │");
