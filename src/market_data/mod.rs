@@ -355,7 +355,11 @@ impl MarketDataManager {
                 .unwrap()
                 .as_millis() as u64;
 
-            let time_since_last_update = current_time.saturating_sub(orderbook.last_update_id);
+            if orderbook.last_update_time == 0 {
+                return true;
+            }
+
+            let time_since_last_update = current_time.saturating_sub(orderbook.last_update_time);
 
             time_since_last_update > max_stale_time_ms
         } else {
@@ -393,11 +397,16 @@ impl MarketDataManager {
         let orderbooks = self.orderbooks.read().await;
 
         if let Some(orderbook) = orderbooks.get(symbol) {
-            let time_since_last_update_ms = std::time::SystemTime::now()
+            let current_time = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_millis() as u64
-                - orderbook.last_update_id;
+                .as_millis() as u64;
+            let last_update_time = if orderbook.last_update_time > 0 {
+                orderbook.last_update_time
+            } else {
+                orderbook.snapshot_time
+            };
+            let time_since_last_update_ms = current_time.saturating_sub(last_update_time);
 
             let data_freshness = if time_since_last_update_ms < 1000 {
                 "fresh".to_string()

@@ -1,6 +1,7 @@
 //! UI Manager for interactive terminal interface
 
 use anyhow::Result;
+use std::io::{self as stdio, Write};
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt};
 use tokio::sync::{Mutex, mpsc};
@@ -11,7 +12,6 @@ use crate::config::Config;
 use crate::market_data::MarketDataManager;
 use crate::market_data::MarketEvent;
 use crate::session::action_channel::{SessionEvent, StatusInfo};
-use crate::session::session_manager::SessionStats;
 
 use super::AppState;
 
@@ -44,6 +44,7 @@ pub struct RenderState {
     pub render_count: u64,
     pub error_message: Option<String>,
     pub info_message: Option<String>,
+    pub pending_messages: Vec<String>,
 }
 
 impl Default for RenderState {
@@ -55,7 +56,21 @@ impl Default for RenderState {
             render_count: 0,
             error_message: None,
             info_message: None,
+            pending_messages: Vec::new(),
         }
+    }
+}
+
+impl RenderState {
+    fn queue_message(&mut self, message: impl Into<String>) {
+        self.pending_messages.push(message.into());
+        self.should_redraw = true;
+    }
+
+    fn drain_messages(&mut self) -> Vec<String> {
+        let mut messages = Vec::new();
+        std::mem::swap(&mut messages, &mut self.pending_messages);
+        messages
     }
 }
 
@@ -221,12 +236,29 @@ impl UIManager {
             self.app_state.symbols.len()
         );
 
+        self.render_state
+            .queue_message("Interactive mode ready. Type /help for commands.");
+
         Ok(())
     }
 
     /// Main UI rendering loop
     async fn run_ui_loop(&mut self) -> Result<()> {
         info!("Starting UI rendering loop");
+
+        let ui_shutdown_tx = self.ui_event_tx.clone();
+        let session_shutdown_tx = self.session_event_tx.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::error!("Failed to listen for Ctrl+C: {}", e);
+                return;
+            }
+
+            tracing::info!("Ctrl+C received, initiating shutdown");
+            let _ = ui_shutdown_tx.send(SessionEvent::ShutdownRequested);
+            let _ = session_shutdown_tx.send(SessionEvent::ShutdownRequested);
+        });
 
         while !self.render_state.should_quit {
             // Check for events
@@ -239,7 +271,9 @@ impl UIManager {
             }
 
             // Handle user input
-            self.handle_input().await?;
+            if !self.render_state.should_quit {
+                self.handle_input().await?;
+            }
 
             // Sleep to prevent busy waiting
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -250,14 +284,11 @@ impl UIManager {
 
     /// Process incoming events
     async fn process_events(&mut self) -> Result<()> {
-        let mut has_events = false;
-
         // Process session events
         let mut events_to_process = Vec::new();
         if let Some(event_rx) = &mut self.event_rx {
             while let Ok(event) = event_rx.try_recv() {
                 events_to_process.push(event);
-                has_events = true;
             }
         }
 
@@ -270,17 +301,11 @@ impl UIManager {
         if let Some(market_event_rx) = &mut self.market_event_rx {
             while let Ok(event) = market_event_rx.try_recv() {
                 market_events_to_process.push(event);
-                has_events = true;
             }
         }
 
         for event in market_events_to_process {
             self.handle_market_event(event).await?;
-        }
-
-        // Mark for redraw if we processed events
-        if has_events {
-            self.render_state.should_redraw = true;
         }
 
         Ok(())
@@ -305,13 +330,20 @@ impl UIManager {
 
     /// Render simple CLI output (placeholder for TUI)
     async fn render_cli_output(&mut self) -> Result<()> {
-        // Use the new CLI rendering functions for consistent formatting
-        crate::ui::cli::render_cli_dashboard(
-            &self.app_state,
-            &self.render_state,
-            SessionStats::default(),
-        )
-        .map_err(|e| anyhow::anyhow!("CLI rendering error: {}", e))?;
+        if self.render_state.render_count == 1 {
+            println!("XTrade Market Data Monitor (interactive mode)");
+        }
+
+        let _ = self.render_state.error_message.take();
+        let _ = self.render_state.info_message.take();
+
+        for message in self.render_state.drain_messages() {
+            println!("{}", message);
+        }
+
+        stdio::stdout()
+            .flush()
+            .map_err(|e| anyhow::anyhow!("Failed to flush stdout: {}", e))?;
 
         Ok(())
     }
@@ -386,8 +418,9 @@ impl UIManager {
             }
             Err(e) => {
                 // Command parsing error
-                self.render_state.error_message = Some(format!("Command error: {}", e));
-                self.render_state.should_redraw = true;
+                let message = format!("Command error: {}", e);
+                self.render_state.error_message = Some(message.clone());
+                self.render_state.queue_message(message);
                 error!("Command parsing error: {}", e);
             }
         }
@@ -422,45 +455,60 @@ impl UIManager {
 
         match event {
             SessionEvent::ShutdownRequested => {
+                self.render_state
+                    .queue_message("Shutdown requested. Exiting interactive session...");
                 self.render_state.should_quit = true;
                 info!("UI received shutdown request");
             }
             SessionEvent::Error { message } => {
-                self.render_state.error_message = Some(message);
-                self.render_state.should_redraw = true;
+                let formatted = format!("Error: {}", message);
+                self.render_state.error_message = Some(formatted.clone());
+                self.render_state.queue_message(formatted);
             }
             SessionEvent::SubscriptionAdded { symbol } => {
                 if !self.app_state.symbols.contains(&symbol) {
-                    self.app_state.symbols.push(symbol);
-                    self.render_state.should_redraw = true;
+                    self.app_state.symbols.push(symbol.clone());
+                    self.render_state
+                        .queue_message(format!("Subscribed to {}", symbol));
                 }
             }
             SessionEvent::SubscriptionRemoved { symbol } => {
                 self.app_state.symbols.retain(|s| s != &symbol);
-                self.render_state.should_redraw = true;
+                self.render_state
+                    .queue_message(format!("Unsubscribed from {}", symbol));
             }
             SessionEvent::SubscriptionList { symbols } => {
-                self.app_state.symbols = symbols;
-                self.render_state.should_redraw = true;
+                self.app_state.symbols = symbols.clone();
+                self.render_state.queue_message(format!(
+                    "Active subscriptions: {}",
+                    if symbols.is_empty() {
+                        "none".to_string()
+                    } else {
+                        symbols.join(", ")
+                    }
+                ));
             }
             SessionEvent::StatusInfo { info } => {
-                self.render_state.info_message = Some(format!(
-                    "Version: {} | State: {} | Subscriptions: {}",
+                let message = format!(
+                    "Status → Version {} | State {} | Subscriptions {}",
                     info.version, info.state, info.active_subscriptions
-                ));
-                self.render_state.should_redraw = true;
+                );
+                self.render_state.info_message = Some(message.clone());
+                self.render_state.queue_message(message);
             }
             SessionEvent::UIModeChanged { enable_tui } => {
                 info!("UI mode changed: TUI {}", enable_tui);
-                self.render_state.should_redraw = true;
+                self.render_state
+                    .queue_message(format!("UI mode changed: TUI {}", enable_tui));
             }
             SessionEvent::LogsInfo { info } => {
-                self.render_state.info_message = Some(format!(
+                let message = format!(
                     "Recent logs ({}): {}",
                     info.log_level,
                     info.recent_logs.join(", ")
-                ));
-                self.render_state.should_redraw = true;
+                );
+                self.render_state.info_message = Some(message.clone());
+                self.render_state.queue_message(message);
             }
             SessionEvent::MarketEvent(event) => {
                 self.handle_market_event(event).await?;
@@ -507,26 +555,27 @@ impl UIManager {
                             price_history: vec![price],
                         },
                     );
+                    self.render_state
+                        .queue_message(format!("Market data stream started for {}", symbol));
                 }
-
-                self.render_state.should_redraw = true;
             }
             MarketEvent::OrderBookUpdate { symbol, orderbook } => {
                 // Update orderbook
                 if let Some(market_data) = self.app_state.market_data.get_mut(&symbol) {
                     market_data.orderbook = Some(orderbook);
                 }
-
-                self.render_state.should_redraw = true;
             }
             MarketEvent::ConnectionStatus { symbol, status } => {
                 debug!("Connection status for {}: {:?}", symbol, status);
-                self.render_state.should_redraw = true;
+                if !matches!(status, crate::binance::types::ConnectionStatus::Connected) {
+                    self.render_state
+                        .queue_message(format!("Connection status for {}: {:?}", symbol, status));
+                }
             }
             MarketEvent::Error { symbol, error } => {
-                self.render_state.error_message =
-                    Some(format!("Market error for {}: {}", symbol, error));
-                self.render_state.should_redraw = true;
+                let message = format!("Market error for {}: {}", symbol, error);
+                self.render_state.error_message = Some(message.clone());
+                self.render_state.queue_message(message);
             }
         }
 

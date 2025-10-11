@@ -22,6 +22,8 @@ pub enum InteractiveCommand {
     Status,
     /// Show detailed information for a specific symbol
     Show { symbol: String },
+    /// Force reconnection & resync workflow
+    Reconnect,
     /// Quit the application
     Quit,
     /// Show recent logs
@@ -156,6 +158,7 @@ impl CommandRouter {
                 }))
             }
             "/status" => Ok(Some(InteractiveCommand::Status)),
+            "/reconnect" | "/r" => Ok(Some(InteractiveCommand::Reconnect)),
             "/config" => {
                 if parts.len() == 1 {
                     Ok(Some(InteractiveCommand::Config { action: None }))
@@ -204,6 +207,7 @@ impl CommandRouter {
         println!("  /list                         - Show current subscriptions");
         println!("  /show  <symbol>               - Show details for symbol");
         println!("  /status                       - Show session statistics");
+        println!("  /reconnect                    - Force reconnection for all subscriptions");
         println!("  /logs                         - Show recent logs");
         println!("  /config [show|set|reset]      - Configuration management");
         println!("  /help                         - Show this help");

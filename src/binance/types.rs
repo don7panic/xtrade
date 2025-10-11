@@ -39,6 +39,7 @@ pub struct OrderBook {
     pub asks: std::collections::BTreeMap<ordered_float::OrderedFloat<f64>, f64>,
     pub last_update_id: u64,
     pub snapshot_time: u64,
+    pub last_update_time: u64,
 }
 
 impl OrderBook {
@@ -50,6 +51,7 @@ impl OrderBook {
             asks: std::collections::BTreeMap::new(),
             last_update_id: 0,
             snapshot_time: 0,
+            last_update_time: 0,
         }
     }
 
@@ -125,6 +127,7 @@ impl OrderBook {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
+        self.last_update_time = self.snapshot_time;
 
         Ok(())
     }
@@ -251,6 +254,8 @@ impl OrderBook {
 
         // Update sequence tracking
         self.last_update_id = update.final_update_id;
+
+        self.last_update_time = update.event_time;
 
         debug!(
             "Applied depth update successfully. New last_update_id: {}, bids: {}, asks: {}",
