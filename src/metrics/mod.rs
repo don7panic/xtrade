@@ -236,6 +236,37 @@ impl MetricsCollector {
                 | ConnectionQualityLevel::Fair
         )
     }
+
+    /// Run metrics collection (placeholder for async operation)
+    pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Metrics collection runs in background
+        Ok(())
+    }
+
+    /// Handle market event for metrics collection
+    pub async fn handle_market_event(
+        &mut self,
+        event: crate::market_data::MarketEvent,
+    ) -> anyhow::Result<()> {
+        match event {
+            crate::market_data::MarketEvent::PriceUpdate { time, .. } => {
+                self.record_message_latency(time);
+            }
+            crate::market_data::MarketEvent::Error { .. } => {
+                self.record_error();
+            }
+            _ => {
+                // Other events don't affect metrics directly
+            }
+        }
+        Ok(())
+    }
+
+    /// Shutdown metrics collector
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        // Cleanup metrics resources
+        Ok(())
+    }
 }
 
 #[cfg(test)]

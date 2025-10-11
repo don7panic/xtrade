@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::{ControlMessage, MarketEvent};
-use crate::binance::types::{BinanceMessage, OrderBook};
+use crate::binance::types::{BinanceMessage, ErrorSeverity, OrderBook, OrderBookError};
 use crate::binance::{BinanceRestClient, BinanceWebSocket};
 
 /// Symbol subscription manager for individual trading pairs
@@ -16,6 +16,7 @@ pub struct SymbolSubscription {
     event_tx: mpsc::UnboundedSender<MarketEvent>,
     ws: BinanceWebSocket,
     message_rx: mpsc::Receiver<Result<BinanceMessage, crate::binance::types::WebSocketError>>,
+    rest_client: BinanceRestClient,
 }
 
 impl SymbolSubscription {
@@ -30,6 +31,7 @@ impl SymbolSubscription {
         // Create WebSocket connection
         let ws_url = "wss://stream.binance.com:9443/ws".to_string();
         let (ws, message_rx) = BinanceWebSocket::new(ws_url);
+        let rest_client = BinanceRestClient::new("https://api.binance.com".to_string());
 
         // Create orderbook
         let orderbook = OrderBook::new(symbol.clone());
@@ -41,6 +43,7 @@ impl SymbolSubscription {
             event_tx,
             ws,
             message_rx,
+            rest_client,
         })
     }
 
@@ -51,7 +54,30 @@ impl SymbolSubscription {
         // Connect to WebSocket
         if let Err(e) = self.ws.connect().await {
             error!("Failed to connect WebSocket for {}: {}", self.symbol, e);
+
+            // Send connection error event
+            if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+                symbol: self.symbol.clone(),
+                status: crate::binance::types::ConnectionStatus::Disconnected,
+            }) {
+                error!(
+                    "Failed to send connection status event for {}: {}",
+                    self.symbol, e
+                );
+            }
+
             return Err(e);
+        }
+
+        // Send connection established event
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Connected,
+        }) {
+            error!(
+                "Failed to send connection status event for {}: {}",
+                self.symbol, e
+            );
         }
 
         // Start listening for messages
@@ -69,14 +95,17 @@ impl SymbolSubscription {
             return Err(e);
         }
 
+        // Subscribe to trade stream for latency/price metrics
+        if let Err(e) = self.ws.subscribe_trade(&self.symbol).await {
+            error!(
+                "Failed to subscribe to trade stream for {}: {}",
+                self.symbol, e
+            );
+            return Err(e);
+        }
+
         // Fetch initial snapshot
-        match self
-            .orderbook
-            .fetch_snapshot(&BinanceRestClient::new(
-                "https://api.binance.com".to_string(),
-            ))
-            .await
-        {
+        match self.orderbook.fetch_snapshot(&self.rest_client).await {
             Ok(_) => {
                 info!("Successfully fetched snapshot for {}", self.symbol);
 
@@ -98,6 +127,18 @@ impl SymbolSubscription {
         }
 
         info!("Successfully initialized subscription for: {}", self.symbol);
+
+        // Send subscription active event
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Connected,
+        }) {
+            error!(
+                "Failed to send connection status event for {}: {}",
+                self.symbol, e
+            );
+        }
+
         Ok(())
     }
 
@@ -169,15 +210,20 @@ impl SymbolSubscription {
                     crate::binance::types::OrderBookUpdate,
                 >(binance_msg.data)
                 {
-                    if let Err(e) = self.orderbook.apply_depth_update(depth_update) {
-                        error!("Failed to apply depth update for {}: {}", self.symbol, e);
-                    } else {
-                        // Send updated orderbook
-                        if let Err(e) = self.event_tx.send(MarketEvent::OrderBookUpdate {
-                            symbol: self.symbol.clone(),
-                            orderbook: self.orderbook.clone(),
-                        }) {
-                            error!("Failed to send orderbook update for {}: {}", self.symbol, e);
+                    match self.orderbook.apply_depth_update(depth_update) {
+                        Ok(_) => {
+                            if let Err(e) = self.event_tx.send(MarketEvent::OrderBookUpdate {
+                                symbol: self.symbol.clone(),
+                                orderbook: self.orderbook.clone(),
+                            }) {
+                                error!(
+                                    "Failed to send orderbook update for {}: {}",
+                                    self.symbol, e
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            self.handle_orderbook_error(e).await;
                         }
                     }
                 }
@@ -213,65 +259,114 @@ impl SymbolSubscription {
         }
     }
 
+    async fn handle_orderbook_error(&mut self, err: OrderBookError) {
+        let severity = err.severity();
+
+        match severity {
+            ErrorSeverity::Info => {
+                debug!(
+                    "Orderbook update issue for {} considered informational: {}",
+                    self.symbol, err
+                );
+            }
+            ErrorSeverity::Warning => {
+                warn!("Orderbook update warning for {}: {}", self.symbol, err);
+            }
+            ErrorSeverity::Error | ErrorSeverity::Critical => {
+                error!("Orderbook update error for {}: {}", self.symbol, err);
+
+                if let Err(send_err) = self.event_tx.send(MarketEvent::Error {
+                    symbol: self.symbol.clone(),
+                    error: err.to_string(),
+                }) {
+                    error!(
+                        "Failed to forward orderbook error event for {}: {}",
+                        self.symbol, send_err
+                    );
+                }
+            }
+        }
+
+        if err.requires_resync() {
+            warn!(
+                "Orderbook for {} requires resync due to: {}. Fetching fresh snapshot.",
+                self.symbol, err
+            );
+            if let Err(resync_err) = self.resync_orderbook().await {
+                error!(
+                    "Failed to resync orderbook for {}: {}",
+                    self.symbol, resync_err
+                );
+            }
+        }
+    }
+
+    async fn resync_orderbook(&mut self) -> Result<()> {
+        self.orderbook.fetch_snapshot(&self.rest_client).await?;
+
+        if let Err(e) = self.event_tx.send(MarketEvent::OrderBookUpdate {
+            symbol: self.symbol.clone(),
+            orderbook: self.orderbook.clone(),
+        }) {
+            error!(
+                "Failed to broadcast resynced orderbook for {}: {}",
+                self.symbol, e
+            );
+        }
+
+        Ok(())
+    }
+
     /// Reconnect the WebSocket connection
     async fn reconnect(&mut self) -> Result<()> {
         info!("Reconnecting WebSocket for: {}", self.symbol);
 
-        // Disconnect first
-        if let Err(e) = self.ws.disconnect().await {
-            warn!(
-                "Error during disconnect before reconnect for {}: {}",
-                self.symbol, e
-            );
-        }
-
-        // Reconnect
-        if let Err(e) = self.ws.connect().await {
-            error!("Failed to reconnect WebSocket for {}: {}", self.symbol, e);
-            return Err(e);
-        }
-
-        // Resubscribe
-        if let Err(e) = self.ws.subscribe_depth(&self.symbol, Some(100)).await {
+        // Send reconnecting status
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Reconnecting,
+        }) {
             error!(
-                "Failed to resubscribe to depth stream for {}: {}",
+                "Failed to send reconnection status event for {}: {}",
                 self.symbol, e
             );
-            return Err(e);
         }
 
-        // Fetch fresh snapshot
-        match self
-            .orderbook
-            .fetch_snapshot(&BinanceRestClient::new(
-                "https://api.binance.com".to_string(),
-            ))
-            .await
-        {
-            Ok(_) => {
-                info!(
-                    "Successfully reconnected and fetched fresh snapshot for {}",
-                    self.symbol
-                );
+        if let Err(e) = self.ws.reconnect().await {
+            error!("Failed to reconnect WebSocket for {}: {}", self.symbol, e);
 
-                // Send updated orderbook
-                if let Err(e) = self.event_tx.send(MarketEvent::OrderBookUpdate {
-                    symbol: self.symbol.clone(),
-                    orderbook: self.orderbook.clone(),
-                }) {
-                    error!(
-                        "Failed to send orderbook update after reconnect for {}: {}",
-                        self.symbol, e
-                    );
-                }
-            }
-            Err(e) => {
+            // Send connection failed event
+            if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+                symbol: self.symbol.clone(),
+                status: crate::binance::types::ConnectionStatus::Error(
+                    "Reconnection failed".to_string(),
+                ),
+            }) {
                 error!(
-                    "Failed to fetch snapshot after reconnect for {}: {}",
+                    "Failed to send connection failed event for {}: {}",
                     self.symbol, e
                 );
-                return Err(e);
             }
+
+            return Err(e);
+        }
+
+        if let Err(e) = self.resync_orderbook().await {
+            error!(
+                "Failed to refresh orderbook after reconnect for {}: {}",
+                self.symbol, e
+            );
+        }
+
+        // Send connection reestablished event
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Connected,
+        }) {
+            error!(
+                "Failed to send connection status event for {}: {}",
+                self.symbol, e
+            );
         }
 
         info!("Successfully reconnected for: {}", self.symbol);
@@ -292,10 +387,32 @@ impl SymbolSubscription {
     pub async fn shutdown(self) -> Result<()> {
         info!("Shutting down subscription for: {}", self.symbol);
 
+        // Send disconnecting status
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Disconnected,
+        }) {
+            error!(
+                "Failed to send disconnecting status event for {}: {}",
+                self.symbol, e
+            );
+        }
+
         // Disconnect WebSocket
         if let Err(e) = self.ws.disconnect().await {
             warn!(
                 "Error during WebSocket disconnect for {}: {}",
+                self.symbol, e
+            );
+        }
+
+        // Send disconnected status
+        if let Err(e) = self.event_tx.send(MarketEvent::ConnectionStatus {
+            symbol: self.symbol.clone(),
+            status: crate::binance::types::ConnectionStatus::Disconnected,
+        }) {
+            error!(
+                "Failed to send disconnected status event for {}: {}",
                 self.symbol, e
             );
         }

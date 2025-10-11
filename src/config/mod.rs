@@ -252,6 +252,50 @@ impl Config {
         // Convert BTC-USDT to BTCUSDT format
         symbol.replace('-', "").to_uppercase()
     }
+
+    /// Display formatted configuration
+    pub fn display(&self) -> Result<()> {
+        println!("Current configuration:");
+        println!("{:#?}", self);
+        Ok(())
+    }
+
+    /// Display configuration summary
+    pub fn display_summary(&self) -> Result<()> {
+        println!("Configuration loaded successfully");
+        Ok(())
+    }
+
+    /// Display configuration management help
+    pub fn display_help() -> Result<()> {
+        println!("Configuration management commands:");
+        println!("  xtrade config show    - Show current configuration");
+        println!("  xtrade config set <key> <value> - Set configuration value");
+        println!("  xtrade config reset   - Reset to default configuration");
+        Ok(())
+    }
+
+    /// Handle configuration command
+    pub fn handle_command(action: &Option<crate::cli::ConfigAction>) -> Result<()> {
+        match action {
+            Some(crate::cli::ConfigAction::Show) => {
+                let config = Config::load_or_default("config.toml");
+                config.display()?;
+            }
+            Some(crate::cli::ConfigAction::Set { key, value }) => {
+                println!("Config set command: {} = {}", key, value);
+                println!("Note: Config set functionality not yet implemented");
+            }
+            Some(crate::cli::ConfigAction::Reset) => {
+                let default_config = Config::default();
+                default_config.display()?;
+            }
+            None => {
+                Config::display_help()?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

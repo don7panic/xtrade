@@ -8,6 +8,9 @@ pub mod tui;
 /// Simple CLI output functions
 pub mod cli;
 
+/// UI Manager for interactive interface
+pub mod ui_manager;
+
 use crate::binance::types::OrderBook;
 use crate::metrics::ConnectionMetrics;
 use std::collections::HashMap;
@@ -91,6 +94,43 @@ impl Default for MarketDataState {
             price_history: Vec::new(),
         }
     }
+}
+
+/// Display welcome page with consistent formatting
+/// This function is shared between SessionManager and UIManager
+pub fn display_welcome_page() -> Result<(), std::io::Error> {
+    println!();
+    println!("┌─ XTrade Market Data Monitor ────────────────────────────────────────┐");
+    println!("│                                                                     │");
+    println!("│                      * Welcome to XTrade! *                         │");
+    println!("│                                                                     │");
+    println!("│   A high-performance cryptocurrency market data monitoring system   │");
+    println!("│                                                                     │");
+    println!("│   Version: {:<50} │", env!("CARGO_PKG_VERSION"));
+    println!(
+        "│   Rust: {:<50} │",
+        std::env::var("RUSTC_VERSION").unwrap_or("unknown".to_string())
+    );
+    println!("│                                                                     │");
+    println!("│   Features:                                                         │");
+    println!("│   • Real-time Binance market data                                   │");
+    println!("│   • OrderBook visualization                                         │");
+    println!("│   • Multi-symbol monitoring                                         │");
+    println!("│   • Performance metrics tracking                                    │");
+    println!("│                                                                     │");
+    println!("│   Commands:                                                         │");
+    println!("│   • /add <symbols> - Subscribe to symbols                           │");
+    println!("│   • /remove <symbols> - Unsubscribe from symbols                    │");
+    println!("│   • /list - Show current subscriptions                              │");
+    println!("│   • /show <symbol> - Show details for symbol                        │");
+    println!("│   • /status - Show session statistics                               │");
+    println!("│   • /logs - Show recent logs                                        │");
+    println!("│   • /config show - Show configuration                               │");
+    println!("│                                                                     │");
+    println!("└────────────────────────────────────────────────────────────────────┘");
+    println!();
+
+    Ok(())
 }
 
 #[cfg(test)]

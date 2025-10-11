@@ -3,6 +3,7 @@ use xtrade::binance::types::{OrderBook, OrderBookError, OrderBookUpdate};
 
 fn make_update(
     symbol: &str,
+    event_time: u64,
     first_id: u64,
     final_id: u64,
     bids: Vec<(&str, &str)>,
@@ -10,7 +11,7 @@ fn make_update(
 ) -> OrderBookUpdate {
     OrderBookUpdate {
         event_type: "depthUpdate".to_string(),
-        event_time: 0,
+        event_time,
         symbol: symbol.to_string(),
         first_update_id: first_id,
         final_update_id: final_id,
@@ -40,6 +41,7 @@ fn best_prices_update_correctly_on_incremental_changes() {
     // Apply incremental update: improve best bid; modify best ask upwards (still > best bid)
     let update = make_update(
         &symbol,
+        1_000,
         11,
         12,
         vec![("100.8", "0.5")],                   // new best bid
@@ -74,7 +76,7 @@ fn zero_quantity_deletes_and_best_price_rolls_back() {
     ob.last_update_id = 20;
 
     // Delete best bid level (quantity = 0)
-    let update = make_update(&symbol, 21, 21, vec![("100.0", "0.0")], vec![]);
+    let update = make_update(&symbol, 2_000, 21, 21, vec![("100.0", "0.0")], vec![]);
     ob.apply_depth_update(update)
         .expect("delete update should succeed");
 
@@ -96,7 +98,7 @@ fn stale_message_is_rejected_and_state_unchanged() {
     let prev_best_ask = ob.best_ask();
 
     // first_update_id <= last_update_id => stale
-    let update = make_update(&symbol, 50, 50, vec![("100.5", "1.0")], vec![]);
+    let update = make_update(&symbol, 3_000, 50, 50, vec![("100.5", "1.0")], vec![]);
     let err = ob.apply_depth_update(update).unwrap_err();
 
     matches!(err, OrderBookError::StaleMessage { .. });
@@ -117,12 +119,28 @@ fn sequence_gap_triggers_validation_error() {
     ob.last_update_id = 10;
 
     // first_update_id > last_update_id + 1 => gap
-    let update = make_update(&symbol, 20, 21, vec![("100.1", "1.0")], vec![]);
+    let update = make_update(&symbol, 4_000, 20, 21, vec![("100.1", "1.0")], vec![]);
     let err = ob.apply_depth_update(update).unwrap_err();
 
     matches!(err, OrderBookError::SequenceValidationFailed { .. });
     assert_eq!(
         ob.last_update_id, 10,
         "last_update_id should remain unchanged on gap"
+    );
+}
+
+#[test]
+fn last_update_time_tracks_event_time() {
+    let symbol = "TESTUSDT".to_string();
+    let mut ob = OrderBook::new(symbol.clone());
+    ob.last_update_id = 30;
+
+    let update = make_update(&symbol, 5_500, 31, 31, vec![("100.0", "1.0")], vec![]);
+    ob.apply_depth_update(update)
+        .expect("update should succeed");
+
+    assert_eq!(
+        ob.last_update_time, 5_500,
+        "last_update_time should reflect update event time"
     );
 }

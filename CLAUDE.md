@@ -33,7 +33,7 @@ XTrade is a high-performance cryptocurrency market data monitor built in Rust wi
 
 **CLI Interface (`src/cli/`)**
 - Command parsing with clap
-- Subcommands: subscribe, unsubscribe, list, ui, status, show, config
+- Subcommands: subscribe, unsubscribe, list, ui, status, show, config, demo, quit
 - Configuration management and logging setup
 
 **Configuration System (`src/config/`)**
@@ -46,18 +46,25 @@ XTrade is a high-performance cryptocurrency market data monitor built in Rust wi
 - REST API client for orderbook snapshots
 - Message parsing and serialization
 - Connection management and reconnection logic
+- Demo and mock implementations for testing
 
 **Market Data Engine (`src/market_data/`)**
-- Orderbook management with BTreeMap for price sorting
-- Snapshot + incremental update validation
+- Concurrent symbol subscription management
+- Orderbook storage with HashMap for quick lookups
 - Real-time price and volume tracking
-- Multi-symbol concurrent processing
+- Multi-symbol concurrent processing with rate limiting
+- Connection quality monitoring and recovery
 
-**TUI Interface (`src/ui/`)**
-- Terminal UI with ratatui and crossterm
-- Real-time data display with sparklines
-- Orderbook visualization with color-coded bids/asks
-- Keyboard navigation and interaction
+**Session Management (`src/session/`)**
+- Interactive terminal session lifecycle management
+- Command routing and action channel for event handling
+- UI and metrics integration
+- Graceful shutdown and timeout handling
+
+**UI Framework (`src/ui/`)**
+- UI manager for coordinating interface components
+- App state management for TUI/CLI modes
+- Event handling and state synchronization
 
 **Metrics System (`src/metrics/`)**
 - Performance monitoring and latency tracking
@@ -69,24 +76,31 @@ XTrade is a high-performance cryptocurrency market data monitor built in Rust wi
 - **Async Runtime**: Tokio for high-performance async I/O
 - **WebSocket**: tokio-tungstenite for Binance stream integration
 - **HTTP Client**: reqwest for REST API calls
-- **TUI Framework**: ratatui + crossterm for cross-platform terminal UI
 - **Error Handling**: anyhow + thiserror for comprehensive error management
 - **Serialization**: serde + serde_json for Binance message parsing
-- **Orderbook Storage**: BTreeMap with ordered-float for price sorting
+- **Concurrency**: Arc<Mutex> patterns for shared state management
+- **Event System**: MPSC channels for inter-component communication
 
 ### Data Flow
-1. CLI command triggers subscription to symbols
-2. Binance WebSocket connects and subscribes to streams
-3. Orderbook snapshots fetched via REST API
-4. Real-time updates applied incrementally
-5. Market data processed and stored in memory
-6. TUI displays real-time data with configurable refresh
+1. CLI command triggers session initialization
+2. Session manager coordinates component initialization
+3. Market data manager handles symbol subscriptions
+4. Binance WebSocket connects and subscribes to streams
+5. Real-time updates processed and stored in memory
+6. UI manager displays data in TUI or CLI mode
 7. Metrics system tracks performance and connection quality
+8. Session manager handles graceful shutdown
 
 ### Development Status
-Based on the sprint plan, this is a work-in-progress project:
-- Week 1: Basic CLI and configuration framework complete
-- Week 2: Binance integration and market data processing (in progress)
-- Week 3: TUI interface and performance optimization (planned)
+Current implementation includes:
+- Complete CLI framework with all subcommands
+- Session management with lifecycle control
+- Market data engine with concurrent subscriptions
+- Binance integration framework
+- UI framework foundation
 
-Current implementation shows placeholder functionality with detailed TODO comments indicating planned features according to the sprint timeline.
+Planned features:
+- Full TUI implementation with ratatui
+- Orderbook visualization
+- Advanced metrics and analytics
+- Performance optimizations
