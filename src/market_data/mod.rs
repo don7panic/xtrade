@@ -2,8 +2,9 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -75,7 +76,7 @@ pub struct MarketDataManager {
     orderbooks: RwLock<HashMap<String, OrderBook>>,
     _rest_client: BinanceRestClient,
     event_tx: mpsc::UnboundedSender<MarketEvent>,
-    event_rx: Option<mpsc::UnboundedReceiver<MarketEvent>>,
+    event_rx: Arc<Mutex<mpsc::UnboundedReceiver<MarketEvent>>>,
 }
 
 impl MarketDataManager {
@@ -88,7 +89,7 @@ impl MarketDataManager {
             orderbooks: RwLock::new(HashMap::new()),
             _rest_client: BinanceRestClient::new("https://api.binance.com".to_string()),
             event_tx,
-            event_rx: Some(event_rx),
+            event_rx: Arc::new(Mutex::new(event_rx)),
         }
     }
 
@@ -430,21 +431,16 @@ impl MarketDataManager {
         }
     }
 
-    /// Get next market event
-    pub async fn next_event(&mut self) -> Option<MarketEvent> {
-        if let Some(event_rx) = &mut self.event_rx {
-            if let Some(event) = event_rx.recv().await {
-                // Track orderbook updates
-                if let MarketEvent::OrderBookUpdate { symbol, orderbook } = &event {
-                    let mut orderbooks = self.orderbooks.write().await;
-                    orderbooks.insert(symbol.clone(), orderbook.clone());
-                }
-                Some(event)
-            } else {
-                None
-            }
-        } else {
-            None
+    /// Clone the market event receiver.
+    pub fn event_receiver(&self) -> Arc<Mutex<mpsc::UnboundedReceiver<MarketEvent>>> {
+        self.event_rx.clone()
+    }
+
+    /// Update internal state for a processed market event.
+    pub async fn process_market_event(&self, event: &MarketEvent) {
+        if let MarketEvent::OrderBookUpdate { symbol, orderbook } = event {
+            let mut orderbooks = self.orderbooks.write().await;
+            orderbooks.insert(symbol.clone(), orderbook.clone());
         }
     }
 }
