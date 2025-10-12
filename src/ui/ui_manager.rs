@@ -4,8 +4,9 @@ use anyhow::Result;
 use std::io::{self as stdio, Write};
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{Mutex, mpsc};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::cli::Cli;
 use crate::config::Config;
@@ -260,6 +261,34 @@ impl UIManager {
             let _ = session_shutdown_tx.send(SessionEvent::ShutdownRequested);
         });
 
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
+        let input_task = tokio::spawn(async move {
+            let mut reader = io::BufReader::new(tokio::io::stdin());
+
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => {
+                        // EOF or stdin closed; stop reading.
+                        break;
+                    }
+                    Ok(_) => {
+                        let trimmed = line.trim().to_string();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if input_tx.send(trimmed).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to read user input: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
         while !self.render_state.should_quit {
             // Check for events
             self.process_events().await?;
@@ -272,11 +301,18 @@ impl UIManager {
 
             // Handle user input
             if !self.render_state.should_quit {
-                self.handle_input().await?;
+                self.handle_input(&mut input_rx).await?;
             }
 
             // Sleep to prevent busy waiting
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        input_task.abort();
+        if let Err(e) = input_task.await {
+            if !e.is_cancelled() {
+                warn!("Input task ended with error: {}", e);
+            }
         }
 
         Ok(())
@@ -348,33 +384,18 @@ impl UIManager {
         Ok(())
     }
 
-    /// Handle user input
-    async fn handle_input(&mut self) -> Result<()> {
-        // Check for user input from stdin
-        let mut stdin = io::stdin();
-        let mut reader = io::BufReader::new(&mut stdin);
-        let mut line = String::new();
-
-        // Try to read input without blocking
-        match reader.read_line(&mut line).await {
-            Ok(0) => {
-                // EOF - no input available
-                return Ok(());
-            }
-            Ok(_) => {
-                // Input received - process command
-                let trimmed_line = line.trim();
-                if !trimmed_line.is_empty() {
-                    self.process_user_command(trimmed_line).await?;
+    /// Handle user input from the buffered channel
+    async fn handle_input(&mut self, input_rx: &mut mpsc::UnboundedReceiver<String>) -> Result<()> {
+        loop {
+            match input_rx.try_recv() {
+                Ok(line) => {
+                    self.process_user_command(&line).await?;
                 }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No input available - this is normal
-                return Ok(());
-            }
-            Err(e) => {
-                error!("Error reading user input: {}", e);
-                return Err(e.into());
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    warn!("Input channel disconnected");
+                    break;
+                }
             }
         }
 

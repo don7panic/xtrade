@@ -107,10 +107,6 @@ pub fn display_welcome_page() -> Result<(), std::io::Error> {
     println!("│   A high-performance cryptocurrency market data monitoring system   │");
     println!("│                                                                     │");
     println!("│   Version: {:<50} │", env!("CARGO_PKG_VERSION"));
-    println!(
-        "│   Rust: {:<50} │",
-        std::env::var("RUSTC_VERSION").unwrap_or("unknown".to_string())
-    );
     println!("│                                                                     │");
     println!("│   Features:                                                         │");
     println!("│   • Real-time Binance market data                                   │");

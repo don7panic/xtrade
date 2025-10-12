@@ -172,6 +172,9 @@ impl SessionManager {
             return self.run_dry_run_mode().await;
         }
 
+        // Display welcome page
+        self.display_welcome_page().await?;
+
         self.initialize().await?;
 
         self.run().await
@@ -257,9 +260,6 @@ impl SessionManager {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting interactive session loop");
 
-        // Display welcome page
-        self.display_welcome_page().await?;
-
         // Start metrics collection if enabled
         if let Some(metrics_collector) = &self.metrics_collector {
             let metrics_collector = metrics_collector.clone();
@@ -272,8 +272,13 @@ impl SessionManager {
 
         // Main event loop
         let mut shutdown_rx = self.shutdown_rx.take().unwrap();
+        let market_event_rx = {
+            let manager = self.market_manager.lock().await;
+            manager.event_receiver()
+        };
 
         while self.state != SessionState::Terminated {
+            let market_event_rx = market_event_rx.clone();
             tokio::select! {
                 // Handle shutdown signal
                 _ = shutdown_rx.recv() => {
@@ -295,16 +300,26 @@ impl SessionManager {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                     self.check_timeout().await?;
                 }
-            }
 
-            // Handle market events separately to avoid borrowing conflicts
-            let market_event = {
-                let mut market_manager = self.market_manager.lock().await;
-                market_manager.next_event().await
-            };
-
-            if let Some(market_event) = market_event {
-                self.handle_market_event(market_event).await?;
+                // Handle market events without blocking other tasks
+                market_event = async {
+                    let mut receiver = market_event_rx.lock().await;
+                    receiver.recv().await
+                } => {
+                    match market_event {
+                        Some(market_event) => {
+                            {
+                                let manager = self.market_manager.lock().await;
+                                manager.process_market_event(&market_event).await;
+                            }
+                            self.handle_market_event(market_event).await?;
+                        }
+                        None => {
+                            warn!("Market event channel closed");
+                            self.state = SessionState::Terminated;
+                        }
+                    }
+                }
             }
         }
 
