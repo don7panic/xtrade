@@ -17,7 +17,7 @@ enable_sparkline = true
 log_level = "info"
 
 [log]
-# Rolling log file destination (hourly rotation)
+# Rolling log file destination (hourly rotation, local time, files named like xtrade-YYYY-MM-DD-HH.log)
 file_path = "logs/xtrade.log"
 
 [binance]

@@ -335,7 +335,7 @@ sparkline_points = 60
 - `orderbook_depth`: Number of price levels to display in orderbook (10-50)
 - `enable_sparkline`: Enable/disable price sparkline charts
 - `log_level`: Logging verbosity level
-- `log.file_path`: Destination for file-based logs. Files are rotated hourly with the pattern `<file>.<YYYY-MM-DD-HH>`.
+- `log.file_path`: Destination for file-based logs. Files are rotated hourly using local time with the pattern `<prefix>-<YYYY-MM-DD-HH><suffix>` (defaults to `xtrade-YYYY-MM-DD-HH.log`).
 
 #### Binance Settings
 
