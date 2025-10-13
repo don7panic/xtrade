@@ -335,6 +335,7 @@ sparkline_points = 60
 - `orderbook_depth`: Number of price levels to display in orderbook (10-50)
 - `enable_sparkline`: Enable/disable price sparkline charts
 - `log_level`: Logging verbosity level
+- `log.file_path`: Destination for file-based logs. Files are rotated hourly with the pattern `<file>.<YYYY-MM-DD-HH>`.
 
 #### Binance Settings
 
@@ -360,6 +361,9 @@ sparkline_points = 60
 symbols = ["BTCUSDT"]
 refresh_rate_ms = 500
 log_level = "info"
+
+[log]
+file_path = "logs/xtrade.log"
 ```
 
 #### High-Frequency Trading Configuration
@@ -399,6 +403,9 @@ export XTRADE_ORDERBOOK_DEPTH=25
 
 # Log level
 export XTRADE_LOG_LEVEL=debug
+
+# Log file location (hourly rotation)
+export XTRADE_LOG_FILE_PATH=/var/log/xtrade/xtrade.log
 
 # Binance WebSocket URL
 export XTRADE_BINANCE_WS_URL=wss://stream.binance.com:9443

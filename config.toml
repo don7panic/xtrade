@@ -15,6 +15,10 @@ enable_sparkline = true
 # Logging level (trace, debug, info, warn, error)
 log_level = "info"
 
+[log]
+# Rolling log file destination (hourly rotation)
+file_path = "logs/xtrade.log"
+
 [binance]
 # Binance WebSocket URL
 ws_url = "wss://stream.binance.com:9443"

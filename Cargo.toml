@@ -45,6 +45,7 @@ toml = "0.8"
 # 日志系统
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # 指标收集
 metrics = "0.21"
