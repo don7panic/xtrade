@@ -24,6 +24,9 @@ pub struct Config {
     /// Logging level
     pub log_level: String,
 
+    /// File-based logging configuration
+    pub log: LogConfig,
+
     /// Binance-specific configuration
     pub binance: BinanceConfig,
 
@@ -61,6 +64,12 @@ pub struct UiConfig {
     pub sparkline_points: usize,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LogConfig {
+    /// Absolute or relative path to the rolling log file
+    pub file_path: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -69,6 +78,7 @@ impl Default for Config {
             orderbook_depth: 20,
             enable_sparkline: true,
             log_level: "info".to_string(),
+            log: LogConfig::default(),
             binance: BinanceConfig::default(),
             ui: UiConfig::default(),
         }
@@ -93,6 +103,14 @@ impl Default for UiConfig {
             enable_colors: true,
             update_rate_fps: 20,
             sparkline_points: 60,
+        }
+    }
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            file_path: "logs/xtrade.log".to_string(),
         }
     }
 }
@@ -146,6 +164,13 @@ impl Config {
         // XTRADE_LOG_LEVEL - logging level
         if let Ok(log_level) = env::var("XTRADE_LOG_LEVEL") {
             self.log_level = log_level;
+        }
+
+        // XTRADE_LOG_FILE_PATH - logging destination file
+        if let Ok(file_path) = env::var("XTRADE_LOG_FILE_PATH") {
+            if !file_path.trim().is_empty() {
+                self.log.file_path = file_path;
+            }
         }
 
         // Binance-specific environment variables
@@ -235,6 +260,10 @@ impl Config {
 
         if self.binance.timeout_seconds == 0 {
             anyhow::bail!("Timeout must be greater than 0");
+        }
+
+        if self.log.file_path.trim().is_empty() {
+            anyhow::bail!("Log file path must not be empty");
         }
 
         // Validate symbol format (basic check)
