@@ -363,7 +363,7 @@ refresh_rate_ms = 500
 log_level = "info"
 
 [log]
-file_path = "logs/xtrade.log"
+file_path = "logs"
 ```
 
 #### High-Frequency Trading Configuration
@@ -405,7 +405,7 @@ export XTRADE_ORDERBOOK_DEPTH=25
 export XTRADE_LOG_LEVEL=debug
 
 # Log file location (hourly rotation)
-export XTRADE_LOG_FILE_PATH=/var/log/xtrade/xtrade.log
+export XTRADE_LOG_FILE_PATH=/var/log
 
 # Binance WebSocket URL
 export XTRADE_BINANCE_WS_URL=wss://stream.binance.com:9443
