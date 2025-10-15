@@ -1,20 +1,23 @@
 //! UI Manager for interactive terminal interface
 
 use anyhow::Result;
-use std::io::{self as stdio, Write};
 use std::sync::Arc;
-use tokio::io::{self, AsyncBufReadExt};
-use tokio::sync::mpsc::error::TryRecvError;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
+
+use crossterm::event::{self, Event};
 
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::market_data::MarketDataManager;
 use crate::market_data::MarketEvent;
+use crate::metrics::ConnectionStatus as MetricsConnectionStatus;
 use crate::session::action_channel::{SessionEvent, StatusInfo};
+use crate::session::session_manager::SessionStats;
 
 use super::AppState;
+use super::tui::{Tui, UiAction, handle_key_event};
 
 /// UI Manager for managing the terminal interface
 pub struct UIManager {
@@ -34,6 +37,16 @@ pub struct UIManager {
     render_state: RenderState,
     /// Dry-run mode flag
     dry_run: bool,
+    /// Active configuration snapshot
+    config: Config,
+    /// TUI terminal handle
+    tui: Option<Tui>,
+    /// Desired refresh cadence
+    refresh_interval: Duration,
+    /// Time of the last successful render
+    last_render: Instant,
+    /// Latest session statistics from the backend
+    session_stats: SessionStats,
 }
 
 /// UI rendering state
@@ -67,12 +80,6 @@ impl RenderState {
         self.pending_messages.push(message.into());
         self.should_redraw = true;
     }
-
-    fn drain_messages(&mut self) -> Vec<String> {
-        let mut messages = Vec::new();
-        std::mem::swap(&mut messages, &mut self.pending_messages);
-        messages
-    }
 }
 
 impl UIManager {
@@ -80,10 +87,13 @@ impl UIManager {
     pub fn new(
         market_manager: Arc<Mutex<MarketDataManager>>,
         session_event_tx: mpsc::UnboundedSender<SessionEvent>,
+        config: Config,
     ) -> Self {
         // Create event channels
         let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
         let (_market_event_tx, market_event_rx) = mpsc::unbounded_channel();
+
+        let refresh_interval = Duration::from_millis(config.refresh_rate_ms.max(16).min(1000));
 
         Self {
             market_manager,
@@ -91,9 +101,14 @@ impl UIManager {
             ui_event_tx,
             event_rx: Some(ui_event_rx),
             market_event_rx: Some(market_event_rx),
-            app_state: AppState::new(Vec::new()),
+            app_state: AppState::new(config.symbols.clone()),
             render_state: RenderState::default(),
             dry_run: false,
+            config,
+            tui: None,
+            refresh_interval,
+            last_render: Instant::now(),
+            session_stats: SessionStats::default(),
         }
     }
 
@@ -101,8 +116,9 @@ impl UIManager {
     pub fn new_with_dry_run(
         market_manager: Arc<Mutex<MarketDataManager>>,
         session_event_tx: mpsc::UnboundedSender<SessionEvent>,
+        config: Config,
     ) -> Self {
-        let mut ui_manager = Self::new(market_manager, session_event_tx);
+        let mut ui_manager = Self::new(market_manager, session_event_tx, config);
         ui_manager.dry_run = true;
         ui_manager
     }
@@ -231,14 +247,17 @@ impl UIManager {
         let symbols = manager.list_subscriptions().await;
 
         self.app_state.symbols = symbols;
+        self.app_state.normalize_selected_tab();
 
         info!(
             "UI initialized with {} symbols",
             self.app_state.symbols.len()
         );
 
-        self.render_state
-            .queue_message("Interactive mode ready. Type /help for commands.");
+        let message = "Interactive mode ready. Press '/' for commands.";
+        self.render_state.queue_message(message);
+        self.app_state.push_log(message);
+        self.render_state.should_redraw = true;
 
         Ok(())
     }
@@ -261,58 +280,92 @@ impl UIManager {
             let _ = session_shutdown_tx.send(SessionEvent::ShutdownRequested);
         });
 
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
-        let input_task = tokio::spawn(async move {
-            let mut reader = io::BufReader::new(tokio::io::stdin());
+        self.tui =
+            Some(Tui::new().map_err(|e| anyhow::anyhow!("Failed to initialise terminal: {}", e))?);
+        self.render_state.should_redraw = true;
+        self.last_render = Instant::now()
+            .checked_sub(self.refresh_interval)
+            .unwrap_or_else(|| Instant::now());
 
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => {
-                        // EOF or stdin closed; stop reading.
-                        break;
-                    }
-                    Ok(_) => {
-                        let trimmed = line.trim().to_string();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if input_tx.send(trimmed).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to read user input: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-
-        while !self.render_state.should_quit {
-            // Check for events
+        while !self.render_state.should_quit && !self.app_state.should_quit {
+            // Process async events from the session layer
             self.process_events().await?;
 
-            // Render if needed
-            if self.render_state.should_redraw {
-                self.render().await?;
+            // Handle terminal input (non-blocking)
+            self.poll_terminal_events()?;
+
+            // Render on dirty state or cadence tick
+            let now = Instant::now();
+            if self.render_state.should_redraw
+                || now.duration_since(self.last_render) >= self.refresh_interval
+            {
+                if let Some(tui) = self.tui.as_mut() {
+                    self.render_state.render_count += 1;
+                    self.render_state.last_render_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                        as u64;
+
+                    tui.draw(
+                        &self.app_state,
+                        &self.render_state,
+                        &self.session_stats,
+                        self.config.orderbook_depth,
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to render frame: {}", e))?;
+                }
                 self.render_state.should_redraw = false;
+                self.last_render = now;
             }
 
-            // Handle user input
-            if !self.render_state.should_quit {
-                self.handle_input(&mut input_rx).await?;
-            }
-
-            // Sleep to prevent busy waiting
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Prevent busy loop
+            tokio::time::sleep(Duration::from_millis(16)).await;
         }
 
-        input_task.abort();
-        if let Err(e) = input_task.await {
-            if !e.is_cancelled() {
-                warn!("Input task ended with error: {}", e);
+        if let Some(tui) = self.tui.as_mut() {
+            tui.restore()
+                .map_err(|e| anyhow::anyhow!("Failed to restore terminal state: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Poll for keyboard/terminal events and translate into session actions
+    fn poll_terminal_events(&mut self) -> Result<()> {
+        while event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                Event::Key(key_event) => {
+                    let action = handle_key_event(&mut self.app_state, key_event);
+                    self.render_state.should_redraw = true;
+
+                    match action {
+                        UiAction::None => {}
+                        UiAction::QuitRequested => {
+                            self.render_state.should_quit = true;
+                            let _ = self.session_event_tx.send(SessionEvent::ShutdownRequested);
+                        }
+                        UiAction::SubmitCommand(cmd) => {
+                            if let Err(e) = self.process_user_command(&cmd) {
+                                let message = format!("Command error: {}", e);
+                                self.render_state.error_message = Some(message.clone());
+                                self.app_state.push_log(message);
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => {
+                    self.render_state.should_redraw = true;
+                }
+                Event::Mouse(_) => {
+                    // Mouse events are ignored for now
+                }
+                Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
             }
+        }
+
+        if self.app_state.should_quit {
+            self.render_state.should_quit = true;
         }
 
         Ok(())
@@ -328,6 +381,7 @@ impl UIManager {
             }
         }
 
+        let processed_session = !events_to_process.is_empty();
         for event in events_to_process {
             self.handle_event(event).await?;
         }
@@ -340,70 +394,20 @@ impl UIManager {
             }
         }
 
+        let processed_market = !market_events_to_process.is_empty();
         for event in market_events_to_process {
             self.handle_market_event(event).await?;
         }
 
-        Ok(())
-    }
-
-    /// Render the UI
-    async fn render(&mut self) -> Result<()> {
-        debug!("Rendering UI (render #{})", self.render_state.render_count);
-
-        // Update render statistics
-        self.render_state.render_count += 1;
-        self.render_state.last_render_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        // Simple CLI output for now
-        self.render_cli_output().await?;
-
-        Ok(())
-    }
-
-    /// Render simple CLI output (placeholder for TUI)
-    async fn render_cli_output(&mut self) -> Result<()> {
-        if self.render_state.render_count == 1 {
-            println!("XTrade Market Data Monitor (interactive mode)");
-        }
-
-        let _ = self.render_state.error_message.take();
-        let _ = self.render_state.info_message.take();
-
-        for message in self.render_state.drain_messages() {
-            println!("{}", message);
-        }
-
-        stdio::stdout()
-            .flush()
-            .map_err(|e| anyhow::anyhow!("Failed to flush stdout: {}", e))?;
-
-        Ok(())
-    }
-
-    /// Handle user input from the buffered channel
-    async fn handle_input(&mut self, input_rx: &mut mpsc::UnboundedReceiver<String>) -> Result<()> {
-        loop {
-            match input_rx.try_recv() {
-                Ok(line) => {
-                    self.process_user_command(&line).await?;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    warn!("Input channel disconnected");
-                    break;
-                }
-            }
+        if processed_session || processed_market {
+            self.render_state.should_redraw = true;
         }
 
         Ok(())
     }
 
     /// Process user command from input
-    async fn process_user_command(&mut self, input: &str) -> Result<()> {
+    fn process_user_command(&mut self, input: &str) -> Result<()> {
         debug!("Processing user command: {}", input);
 
         // Create a temporary command router to parse the command
@@ -424,6 +428,7 @@ impl UIManager {
                             .map_err(|e| {
                                 anyhow::anyhow!("Failed to send shutdown request: {}", e)
                             })?;
+                        self.app_state.push_log("Shutdown requested via command");
                     }
                     _ => {
                         // Forward other commands to session manager
@@ -473,33 +478,43 @@ impl UIManager {
     /// Handle session event
     pub async fn handle_event(&mut self, event: SessionEvent) -> Result<()> {
         debug!("Handling UI event: {:?}", event);
+        self.render_state.should_redraw = true;
 
         match event {
             SessionEvent::ShutdownRequested => {
                 self.render_state
                     .queue_message("Shutdown requested. Exiting interactive session...");
                 self.render_state.should_quit = true;
+                self.app_state
+                    .push_log("Shutdown requested by session manager");
                 info!("UI received shutdown request");
             }
             SessionEvent::Error { message } => {
                 let formatted = format!("Error: {}", message);
                 self.render_state.error_message = Some(formatted.clone());
                 self.render_state.queue_message(formatted);
+                self.app_state.push_log(format!("Error: {}", message));
             }
             SessionEvent::SubscriptionAdded { symbol } => {
                 if !self.app_state.symbols.contains(&symbol) {
                     self.app_state.symbols.push(symbol.clone());
+                    self.app_state.normalize_selected_tab();
                     self.render_state
                         .queue_message(format!("Subscribed to {}", symbol));
+                    self.app_state.push_log(format!("Subscribed to {}", symbol));
                 }
             }
             SessionEvent::SubscriptionRemoved { symbol } => {
                 self.app_state.symbols.retain(|s| s != &symbol);
+                self.app_state.normalize_selected_tab();
                 self.render_state
                     .queue_message(format!("Unsubscribed from {}", symbol));
+                self.app_state
+                    .push_log(format!("Unsubscribed from {}", symbol));
             }
             SessionEvent::SubscriptionList { symbols } => {
                 self.app_state.symbols = symbols.clone();
+                self.app_state.normalize_selected_tab();
                 self.render_state.queue_message(format!(
                     "Active subscriptions: {}",
                     if symbols.is_empty() {
@@ -508,6 +523,8 @@ impl UIManager {
                         symbols.join(", ")
                     }
                 ));
+                self.app_state
+                    .push_log(format!("Active subscriptions: {}", symbols.join(", ")));
             }
             SessionEvent::StatusInfo { info } => {
                 let message = format!(
@@ -516,20 +533,57 @@ impl UIManager {
                 );
                 self.render_state.info_message = Some(message.clone());
                 self.render_state.queue_message(message);
+                self.app_state.symbols = info.symbols.clone();
+                self.app_state.normalize_selected_tab();
+                self.session_stats = info.session_stats.clone();
+                self.app_state.push_log(format!(
+                    "Session status updated: {} symbols active",
+                    info.active_subscriptions
+                ));
             }
             SessionEvent::UIModeChanged { enable_tui } => {
                 info!("UI mode changed: TUI {}", enable_tui);
                 self.render_state
                     .queue_message(format!("UI mode changed: TUI {}", enable_tui));
+                self.app_state
+                    .push_log(format!("UI mode changed: TUI {}", enable_tui));
             }
-            SessionEvent::LogsInfo { info } => {
+            SessionEvent::ConfigInfo { config } => {
+                self.config = config.clone();
+                self.refresh_interval = Duration::from_millis(self.config.refresh_rate_ms.max(16));
                 let message = format!(
-                    "Recent logs ({}): {}",
-                    info.log_level,
-                    info.recent_logs.join(", ")
+                    "Config updated → refresh {}ms, depth {}",
+                    self.config.refresh_rate_ms, self.config.orderbook_depth
                 );
                 self.render_state.info_message = Some(message.clone());
                 self.render_state.queue_message(message);
+                self.app_state.push_log("Configuration updated".to_string());
+            }
+            SessionEvent::ConfigReset => {
+                self.config = Config::default();
+                self.refresh_interval = Duration::from_millis(self.config.refresh_rate_ms.max(16));
+                let message = "Configuration reset to defaults".to_string();
+                self.render_state.info_message = Some(message.clone());
+                self.render_state.queue_message(message.clone());
+                self.app_state.push_log(message);
+            }
+            SessionEvent::ConfigHelp => {
+                self.render_state.queue_message(
+                    "Config commands: /config show | /config set <key> <value> | /config reset",
+                );
+                self.app_state.push_log("Displayed config help".to_string());
+            }
+            SessionEvent::MetricsUpdate { metrics } => {
+                self.app_state.connection_metrics = metrics;
+            }
+            SessionEvent::LogsInfo { mut info } => {
+                let joined = info.recent_logs.join(", ");
+                let message = format!("Recent logs ({}): {}", info.log_level, joined);
+                self.render_state.info_message = Some(message.clone());
+                self.render_state.queue_message(message);
+                for log in info.recent_logs.drain(..) {
+                    self.app_state.push_log(log);
+                }
             }
             SessionEvent::MarketEvent(event) => {
                 self.handle_market_event(event).await?;
@@ -558,8 +612,10 @@ impl UIManager {
                     market_data.price_history.push(price);
 
                     // Keep history size manageable
-                    if market_data.price_history.len() > 100 {
-                        market_data.price_history.remove(0);
+                    let max_points = self.config.ui.sparkline_points.max(2);
+                    if market_data.price_history.len() > max_points {
+                        let overflow = market_data.price_history.len() - max_points;
+                        market_data.price_history.drain(0..overflow);
                     }
                 } else {
                     // Create new market data entry
@@ -578,6 +634,8 @@ impl UIManager {
                     );
                     self.render_state
                         .queue_message(format!("Market data stream started for {}", symbol));
+                    self.app_state
+                        .push_log(format!("Market data stream started for {}", symbol));
                 }
             }
             MarketEvent::OrderBookUpdate { symbol, orderbook } => {
@@ -591,15 +649,38 @@ impl UIManager {
                 if !matches!(status, crate::binance::types::ConnectionStatus::Connected) {
                     self.render_state
                         .queue_message(format!("Connection status for {}: {:?}", symbol, status));
+                    self.app_state
+                        .push_log(format!("Connection status for {}: {:?}", symbol, status));
                 }
+
+                self.app_state.connection_metrics.status = match status {
+                    crate::binance::types::ConnectionStatus::Disconnected => {
+                        MetricsConnectionStatus::Disconnected
+                    }
+                    crate::binance::types::ConnectionStatus::Connecting => {
+                        MetricsConnectionStatus::Connecting
+                    }
+                    crate::binance::types::ConnectionStatus::Connected => {
+                        MetricsConnectionStatus::Connected
+                    }
+                    crate::binance::types::ConnectionStatus::Reconnecting => {
+                        MetricsConnectionStatus::Reconnecting
+                    }
+                    crate::binance::types::ConnectionStatus::Error(err) => {
+                        MetricsConnectionStatus::Error(err)
+                    }
+                };
             }
             MarketEvent::Error { symbol, error } => {
                 let message = format!("Market error for {}: {}", symbol, error);
                 self.render_state.error_message = Some(message.clone());
                 self.render_state.queue_message(message);
+                self.app_state
+                    .push_log(format!("Market error for {}: {}", symbol, error));
             }
         }
 
+        self.render_state.should_redraw = true;
         Ok(())
     }
 
@@ -608,6 +689,13 @@ impl UIManager {
         info!("Shutting down UI manager");
 
         self.render_state.should_quit = true;
+        self.app_state.should_quit = true;
+
+        if let Some(tui) = self.tui.as_mut() {
+            if let Err(e) = tui.restore() {
+                warn!("Failed to restore terminal during shutdown: {}", e);
+            }
+        }
 
         Ok(())
     }

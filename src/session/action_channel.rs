@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::market_data::MarketEvent;
+use crate::metrics::ConnectionMetrics;
 use crate::session::command_router::InteractiveCommand;
 
 /// Session events for communication between components
@@ -41,6 +42,8 @@ pub enum SessionEvent {
     DemoCompleted,
     /// Logs information
     LogsInfo { info: LogsInfo },
+    /// Metrics snapshot update
+    MetricsUpdate { metrics: ConnectionMetrics },
     /// Market data event
     MarketEvent(MarketEvent),
     /// User command from interactive input
