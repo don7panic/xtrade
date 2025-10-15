@@ -13,7 +13,7 @@ pub mod ui_manager;
 
 use crate::binance::types::OrderBook;
 use crate::metrics::ConnectionMetrics;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Application state for UI components
 #[derive(Debug, Clone)]
@@ -24,6 +24,10 @@ pub struct AppState {
     pub market_data: HashMap<String, MarketDataState>,
     pub connection_metrics: ConnectionMetrics,
     pub paused: bool,
+    pub log_messages: VecDeque<String>,
+    pub notifications: VecDeque<String>,
+    pub command_buffer: String,
+    pub input_mode: InputMode,
 }
 
 /// Market data state for a single symbol
@@ -39,6 +43,13 @@ pub struct MarketDataState {
     pub price_history: Vec<f64>,
 }
 
+/// Input mode for the TUI command palette
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    Command,
+}
+
 impl AppState {
     /// Create new application state
     pub fn new(symbols: Vec<String>) -> Self {
@@ -49,6 +60,10 @@ impl AppState {
             market_data: HashMap::new(),
             connection_metrics: ConnectionMetrics::default(),
             paused: false,
+            log_messages: VecDeque::with_capacity(128),
+            notifications: VecDeque::with_capacity(64),
+            command_buffer: String::new(),
+            input_mode: InputMode::Normal,
         }
     }
 
@@ -79,6 +94,47 @@ impl AppState {
     pub fn toggle_pause(&mut self) {
         self.paused = !self.paused;
     }
+
+    /// Update focused symbol based on name
+    pub fn focus_symbol(&mut self, symbol: &str) {
+        if let Some(idx) = self.symbols.iter().position(|s| s == symbol) {
+            self.selected_tab = idx;
+        }
+    }
+
+    /// Ensure selected tab remains in range after symbol list updates
+    pub fn normalize_selected_tab(&mut self) {
+        if self.symbols.is_empty() {
+            self.selected_tab = 0;
+            return;
+        }
+        if self.selected_tab >= self.symbols.len() {
+            self.selected_tab = self.symbols.len() - 1;
+        }
+    }
+
+    /// Append a log message with bounded history
+    pub fn push_log(&mut self, message: impl Into<String>) {
+        const MAX_LOGS: usize = 200;
+        self.log_messages.push_back(message.into());
+        while self.log_messages.len() > MAX_LOGS {
+            self.log_messages.pop_front();
+        }
+    }
+
+    /// Append a notification with bounded history
+    pub fn push_notification(&mut self, message: impl Into<String>) {
+        const MAX_NOTIFICATIONS: usize = 50;
+        self.notifications.push_back(message.into());
+        while self.notifications.len() > MAX_NOTIFICATIONS {
+            self.notifications.pop_front();
+        }
+    }
+
+    /// Clear the command buffer
+    pub fn clear_command(&mut self) {
+        self.command_buffer.clear();
+    }
 }
 
 impl Default for MarketDataState {
@@ -93,6 +149,12 @@ impl Default for MarketDataState {
             orderbook: None,
             price_history: Vec::new(),
         }
+    }
+}
+
+impl Default for InputMode {
+    fn default() -> Self {
+        InputMode::Normal
     }
 }
 

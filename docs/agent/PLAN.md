@@ -57,7 +57,6 @@
 ## Week 3（Day 15-21）：TUI 体验与端到端验收
 - **UI 布局与交互**
   - 根据架构图实现多面板布局：行情概要、OrderBook、sparkline、指标、日志/通知。
-  - 完成 Tab/上下键、`focus`、`r`（重连）、`p`（渲染节流）、`s`（快照保存）等快捷键和命令处理。
 - **实时数据绑定**
   - 将 MarketDataManager 事件总线接入 State Store → UI Renderer，支持 100ms 节流与脏标记刷新。
   - 展示多交易对并发数据、颜色区分涨跌、sparkline 环形缓冲限制内存。
@@ -72,6 +71,13 @@
   - 触发 `make fmt`, `cargo clippy -- -D warnings`, `make test` 全绿。
   - 手动脚本验证延迟 < 100ms（P95），网络断线 30s 内恢复。
   - Demo 演练：从启动 → 订阅多个交易对 → 切换面板 → 查看 stats/logs → 优雅退出。
+
+**Week 3 实施进展（当前迭代）**
+- `ratatui` 多面板布局落地，行情/OrderBook/Sparkline/指标/日志区域实时刷新。
+- UI 渲染改为事件驱动 + 100ms 节流，加入 Tab/Shift+Tab、Space、Shift+L、`/` 等快捷键。
+- 市场事件与 `MetricsCollector` 打通，定期推送 `ConnectionMetrics` 到 `stats` 面板。
+- `config set refresh_rate_ms`、`config reset` 等指令即时生效，UI 自动调节刷新节奏与深度配置。
+- 日志面板聚合 Session/Market 事件，错误与告警在终端即时可见。
 
 ## 质量保障与支撑任务
 - 标准化流程：每日确保 `make fmt`, `cargo test`, `cargo clippy` 通过；重要模块引入 `#[tokio::test]` 异步测试。

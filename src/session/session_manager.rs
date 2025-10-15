@@ -2,13 +2,14 @@
 
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::market_data::MarketDataManager;
-use crate::metrics::MetricsCollector;
+use crate::metrics::{ConnectionStatus as MetricsConnectionStatus, MetricsCollector};
 use crate::ui::ui_manager::UIManager;
 
 use super::action_channel::{ActionChannel, SessionEvent};
@@ -89,6 +90,12 @@ pub struct SessionManager {
     ui_event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
     /// Metrics collector (optional)
     metrics_collector: Option<Arc<Mutex<MetricsCollector>>>,
+    /// Latest connection status for metrics reporting
+    metrics_status: MetricsConnectionStatus,
+    /// Last time we emitted metrics to the UI
+    metrics_last_emit: Instant,
+    /// Minimum interval between metrics updates to UI
+    metrics_emit_interval: Duration,
     /// Command router
     command_router: CommandRouter,
     /// Action channel
@@ -124,6 +131,8 @@ impl SessionManager {
             session_timeout_ms: 3600000, // 1 hour default timeout
         };
 
+        let metrics_interval = Duration::from_millis(app_config.refresh_rate_ms.max(50));
+
         Ok(Self {
             config: session_config,
             app_config,
@@ -134,6 +143,9 @@ impl SessionManager {
             ui_task: None,
             ui_event_tx: None,
             metrics_collector: None,
+            metrics_status: MetricsConnectionStatus::Disconnected,
+            metrics_last_emit: Instant::now(),
+            metrics_emit_interval: metrics_interval,
             command_router,
             action_channel,
             shutdown_tx,
@@ -209,8 +221,11 @@ impl SessionManager {
     async fn initialize_ui(&mut self) -> Result<()> {
         info!("Initializing UI manager");
 
-        let mut ui_manager =
-            UIManager::new(self.market_manager.clone(), self.action_channel.event_tx());
+        let mut ui_manager = UIManager::new(
+            self.market_manager.clone(),
+            self.action_channel.event_tx(),
+            self.app_config.clone(),
+        );
 
         // Get UI event sender for forwarding events
         let ui_event_tx = ui_manager.ui_event_sender();
@@ -480,15 +495,73 @@ impl SessionManager {
                 })?;
             }
             Some(crate::cli::ConfigAction::Set { key, value }) => {
-                warn!("Config set command not yet implemented: {}={}", key, value);
-                self.action_channel.send_event(SessionEvent::Error {
-                    message: format!("Config set not implemented: {}={}", key, value),
-                })?;
+                let key_normalized = key.to_ascii_lowercase();
+                match key_normalized.as_str() {
+                    "refresh_rate_ms" | "refresh-rate" => match value.parse::<u64>() {
+                        Ok(parsed) if parsed > 0 => {
+                            self.app_config.refresh_rate_ms = parsed;
+                            self.metrics_emit_interval =
+                                Duration::from_millis(self.app_config.refresh_rate_ms.max(50));
+                            info!("Updated refresh_rate_ms to {}", parsed);
+                            self.action_channel.send_event(SessionEvent::ConfigInfo {
+                                config: self.app_config.clone(),
+                            })?;
+                        }
+                        _ => {
+                            let message = format!("Invalid refresh_rate_ms value: {}", value);
+                            warn!("{}", message);
+                            self.action_channel
+                                .send_event(SessionEvent::Error { message })?;
+                        }
+                    },
+                    "orderbook_depth" | "orderbook-depth" => match value.parse::<usize>() {
+                        Ok(parsed) if parsed > 0 => {
+                            self.app_config.orderbook_depth = parsed;
+                            info!("Updated orderbook_depth to {}", parsed);
+                            self.action_channel.send_event(SessionEvent::ConfigInfo {
+                                config: self.app_config.clone(),
+                            })?;
+                        }
+                        _ => {
+                            let message = format!("Invalid orderbook_depth value: {}", value);
+                            warn!("{}", message);
+                            self.action_channel
+                                .send_event(SessionEvent::Error { message })?;
+                        }
+                    },
+                    "ui.sparkline_points" | "ui.sparkline-points" => match value.parse::<usize>() {
+                        Ok(parsed) if parsed >= 10 => {
+                            self.app_config.ui.sparkline_points = parsed;
+                            info!("Updated ui.sparkline_points to {}", parsed);
+                            self.action_channel.send_event(SessionEvent::ConfigInfo {
+                                config: self.app_config.clone(),
+                            })?;
+                        }
+                        _ => {
+                            let message =
+                                format!("Invalid ui.sparkline_points value: {} (min 10)", value);
+                            warn!("{}", message);
+                            self.action_channel
+                                .send_event(SessionEvent::Error { message })?;
+                        }
+                    },
+                    other => {
+                        let message = format!("Unsupported config key: {}", other);
+                        warn!("{}", message);
+                        self.action_channel
+                            .send_event(SessionEvent::Error { message })?;
+                    }
+                }
             }
             Some(crate::cli::ConfigAction::Reset) => {
                 self.app_config = Config::default();
                 info!("Configuration reset to defaults");
+                self.metrics_emit_interval =
+                    Duration::from_millis(self.app_config.refresh_rate_ms.max(50));
                 self.action_channel.send_event(SessionEvent::ConfigReset)?;
+                self.action_channel.send_event(SessionEvent::ConfigInfo {
+                    config: self.app_config.clone(),
+                })?;
             }
             None => {
                 self.action_channel.send_event(SessionEvent::ConfigHelp)?;
@@ -575,13 +648,50 @@ impl SessionManager {
             }
         }
 
+        if let crate::market_data::MarketEvent::ConnectionStatus { status, .. } = &event {
+            self.metrics_status = match status {
+                crate::binance::types::ConnectionStatus::Disconnected => {
+                    MetricsConnectionStatus::Disconnected
+                }
+                crate::binance::types::ConnectionStatus::Connecting => {
+                    MetricsConnectionStatus::Connecting
+                }
+                crate::binance::types::ConnectionStatus::Connected => {
+                    MetricsConnectionStatus::Connected
+                }
+                crate::binance::types::ConnectionStatus::Reconnecting => {
+                    MetricsConnectionStatus::Reconnecting
+                }
+                crate::binance::types::ConnectionStatus::Error(err) => {
+                    MetricsConnectionStatus::Error(err.clone())
+                }
+            };
+        }
+
         // Forward to metrics collector if available
         if let Some(metrics_collector) = &self.metrics_collector {
-            metrics_collector
-                .lock()
-                .await
-                .handle_market_event(event)
-                .await?;
+            let mut collector = metrics_collector.lock().await;
+            collector.handle_market_event(event.clone()).await?;
+
+            let now = Instant::now();
+            let should_emit =
+                now.duration_since(self.metrics_last_emit) >= self.metrics_emit_interval;
+            let metrics_snapshot = if should_emit {
+                Some(collector.get_connection_metrics(self.metrics_status.clone()))
+            } else {
+                None
+            };
+            drop(collector);
+
+            if let Some(metrics_snapshot) = metrics_snapshot {
+                if let Err(e) = self.action_channel.send_event(SessionEvent::MetricsUpdate {
+                    metrics: metrics_snapshot,
+                }) {
+                    error!("Failed to forward metrics update: {}", e);
+                } else {
+                    self.metrics_last_emit = now;
+                }
+            }
         }
 
         Ok(())
