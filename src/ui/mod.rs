@@ -12,6 +12,7 @@ pub mod cli;
 pub mod ui_manager;
 
 use crate::binance::types::OrderBook;
+use crate::market_data::DailyCandle;
 use crate::metrics::ConnectionMetrics;
 use std::collections::{HashMap, VecDeque};
 
@@ -40,12 +41,21 @@ pub struct MarketDataState {
     pub high_24h: f64,
     pub low_24h: f64,
     pub orderbook: Option<OrderBook>,
-    pub price_history: Vec<f64>,
+    pub price_history: Vec<PricePoint>,
+    pub daily_candles: Vec<DailyCandle>,
+}
+
+/// Historical price sample captured for trend chart
+#[derive(Debug, Clone, Copy)]
+pub struct PricePoint {
+    pub timestamp_ms: u64,
+    pub price: f64,
 }
 
 /// Input mode for the TUI command palette
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
+    #[default]
     Normal,
     Command,
 }
@@ -148,13 +158,8 @@ impl Default for MarketDataState {
             low_24h: 0.0,
             orderbook: None,
             price_history: Vec::new(),
+            daily_candles: Vec::new(),
         }
-    }
-}
-
-impl Default for InputMode {
-    fn default() -> Self {
-        InputMode::Normal
     }
 }
 

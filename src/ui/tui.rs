@@ -16,9 +16,11 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table, Wrap,
+        Axis, Block, Borders, Cell, Chart, Dataset, Gauge, GraphType, List, ListItem, Paragraph,
+        Row, Table, Wrap,
     },
 };
 
@@ -399,7 +401,7 @@ fn render_orderbook(frame: &mut Frame<'_>, area: Rect, app: &AppState, orderbook
 
         let rows = bid_rows
             .into_iter()
-            .zip(ask_rows.into_iter())
+            .zip(ask_rows)
             .map(|(bid, ask)| {
                 let bid_price = bid.0.into_inner();
                 let ask_price = ask.0.into_inner();
@@ -447,7 +449,7 @@ fn render_metrics(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         .split(area);
 
     render_latency_gauges(frame, chunks[0], app);
-    render_price_sparkline(frame, chunks[1], app);
+    render_price_trend(frame, chunks[1], app);
 }
 
 fn render_latency_gauges(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -506,7 +508,7 @@ fn render_latency_gauges(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(gauge, sub[1]);
 }
 
-fn render_price_sparkline(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn render_price_trend(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let block = Block::default()
         .title(" Price Trend ")
         .borders(Borders::ALL);
@@ -515,27 +517,113 @@ fn render_price_sparkline(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
     if let Some(symbol) = app.current_symbol() {
         if let Some(data) = app.market_data.get(symbol) {
-            let series: Vec<u64> = data
-                .price_history
-                .iter()
-                .map(|price| (*price * 100.0) as u64)
-                .collect();
+            let history = &data.price_history;
+            let max_samples = inner.width.saturating_sub(2) as usize;
 
-            if !series.is_empty() {
-                let sparkline = Sparkline::default()
-                    .data(&series)
-                    .style(Style::default().fg(Color::LightCyan));
-                frame.render_widget(sparkline, inner);
+            if max_samples >= 2 && history.len() >= 2 {
+                let start_index = history.len().saturating_sub(max_samples.max(2)); // ensure enough samples
+                let slice = &history[start_index..];
+
+                if slice.len() < 2 {
+                    // Fallback to placeholder if slice becomes too small due to tiny viewport
+                    render_price_trend_placeholder(frame, inner);
+                    return;
+                }
+
+                let first_point = slice.first().unwrap();
+                let last_point = slice.last().unwrap();
+
+                let mut min_price = f64::INFINITY;
+                let mut max_price = f64::NEG_INFINITY;
+                for point in slice.iter() {
+                    if point.price < min_price {
+                        min_price = point.price;
+                    }
+                    if point.price > max_price {
+                        max_price = point.price;
+                    }
+                }
+
+                let price_span = (max_price - min_price).max(f64::EPSILON);
+                let price_padding = (price_span * 0.05).max(0.01);
+                let y_min = min_price - price_padding;
+                let y_max = max_price + price_padding;
+
+                let total_span_ms = last_point
+                    .timestamp_ms
+                    .saturating_sub(first_point.timestamp_ms)
+                    .max(1);
+                let total_span_s = total_span_ms as f64 / 1000.0;
+
+                let mut data_points = Vec::with_capacity(slice.len());
+                for point in slice.iter() {
+                    let delta_ms = point.timestamp_ms.saturating_sub(first_point.timestamp_ms);
+                    let x = delta_ms as f64 / 1000.0;
+                    data_points.push((x, point.price));
+                }
+
+                let axis_style = Style::default().fg(Color::Gray);
+
+                let x_labels = if total_span_s < 1.0 {
+                    vec![
+                        Span::raw("0s"),
+                        Span::raw(format!("{:.2}s", total_span_s / 2.0)),
+                        Span::raw(format!("{:.2}s", total_span_s)),
+                    ]
+                } else {
+                    vec![
+                        Span::raw("0s"),
+                        Span::raw(format!("{:.0}s", total_span_s / 2.0)),
+                        Span::raw(format!("{:.0}s", total_span_s)),
+                    ]
+                };
+
+                let mid_price = min_price + price_span / 2.0;
+                let y_labels = vec![
+                    Span::raw(format!("{:.2}", min_price)),
+                    Span::raw(format!("{:.2}", mid_price)),
+                    Span::raw(format!("{:.2}", max_price)),
+                ];
+
+                let dataset = Dataset::default()
+                    .name(symbol.as_str())
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(Color::LightCyan))
+                    .data(&data_points);
+
+                let chart = Chart::new(vec![dataset])
+                    .block(Block::default())
+                    .x_axis(
+                        Axis::default()
+                            .title("Time")
+                            .style(axis_style)
+                            .labels(x_labels)
+                            .bounds([0.0, total_span_s.max(0.01)]),
+                    )
+                    .y_axis(
+                        Axis::default()
+                            .title("Price")
+                            .style(axis_style)
+                            .labels(y_labels)
+                            .bounds([y_min, y_max.max(y_min + 0.01)]),
+                    );
+
+                frame.render_widget(chart, inner);
                 return;
             }
         }
     }
 
+    render_price_trend_placeholder(frame, inner);
+}
+
+fn render_price_trend_placeholder(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new("Collecting price data...")
             .style(Style::default().fg(Color::Gray))
             .alignment(ratatui::layout::Alignment::Center),
-        inner,
+        area,
     );
 }
 

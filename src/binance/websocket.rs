@@ -16,8 +16,8 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use super::types::{
-    BinanceEventType, BinanceMessage, ConnectionStatus, OrderBookUpdate, SubscribeRequest,
-    Ticker24hr, TradeMessage, UnsubscribeRequest, WebSocketError,
+    BinanceEventType, BinanceMessage, ConnectionStatus, KlineStreamEvent, OrderBookUpdate,
+    SubscribeRequest, Ticker24hr, TradeMessage, UnsubscribeRequest, WebSocketError,
 };
 
 /// Binance WebSocket client
@@ -156,6 +156,17 @@ impl BinanceWebSocket {
     pub async fn subscribe_trade(&self, symbol: &str) -> Result<()> {
         self.subscribe(symbol, "trade").await?;
         info!("Subscribed to trade stream for {}", symbol);
+        Ok(())
+    }
+
+    /// Subscribe to kline stream for a symbol with the given interval
+    pub async fn subscribe_kline(&self, symbol: &str, interval: &str) -> Result<()> {
+        let stream_type = format!("kline_{}", interval);
+        self.subscribe(symbol, &stream_type).await?;
+        info!(
+            "Subscribed to kline stream for {} interval {}",
+            symbol, interval
+        );
         Ok(())
     }
 
@@ -396,12 +407,37 @@ impl BinanceWebSocket {
                         })
                     }
                     Some(BinanceEventType::Kline) => {
-                        // Kline messages are not yet fully supported
-                        debug!("Received kline message (not fully supported)");
-                        Ok(BinanceMessage {
-                            stream: "kline".to_string(),
-                            data: value,
-                        })
+                        let kline_event: KlineStreamEvent =
+                            serde_json::from_value(value).map_err(|e| {
+                                WebSocketError::ParseError(format!(
+                                    "Failed to parse kline message: {}",
+                                    e
+                                ))
+                            })?;
+
+                        let stream = format!(
+                            "{}@kline_{}",
+                            kline_event.symbol.to_lowercase(),
+                            kline_event.kline.interval
+                        );
+
+                        debug!(
+                            "Received kline message: symbol={}, interval={}, open={}, close={}, final={}",
+                            kline_event.symbol,
+                            kline_event.kline.interval,
+                            kline_event.kline.open,
+                            kline_event.kline.close,
+                            kline_event.kline.is_final
+                        );
+
+                        let data = serde_json::to_value(&kline_event).map_err(|e| {
+                            WebSocketError::ParseError(format!(
+                                "Failed to serialize kline message: {}",
+                                e
+                            ))
+                        })?;
+
+                        Ok(BinanceMessage { stream, data })
                     }
                     Some(BinanceEventType::AggregatedTrade) => {
                         // Aggregated trade messages are not yet fully supported

@@ -466,6 +466,58 @@ pub struct Ticker24hr {
     pub total_trades: u64,
 }
 
+/// WebSocket kline stream event wrapper
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KlineStreamEvent {
+    #[serde(rename = "e")]
+    pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: u64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "k")]
+    pub kline: KlineData,
+}
+
+/// Detailed kline payload
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct KlineData {
+    #[serde(rename = "t")]
+    pub start_time: u64,
+    #[serde(rename = "T")]
+    pub close_time: u64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "i")]
+    pub interval: String,
+    #[serde(rename = "f")]
+    pub first_trade_id: u64,
+    #[serde(rename = "L")]
+    pub last_trade_id: u64,
+    #[serde(rename = "o")]
+    pub open: String,
+    #[serde(rename = "c")]
+    pub close: String,
+    #[serde(rename = "h")]
+    pub high: String,
+    #[serde(rename = "l")]
+    pub low: String,
+    #[serde(rename = "v")]
+    pub volume: String,
+    #[serde(rename = "n")]
+    pub number_of_trades: u64,
+    #[serde(rename = "x")]
+    pub is_final: bool,
+    #[serde(rename = "q")]
+    pub quote_volume: String,
+    #[serde(rename = "V")]
+    pub taker_buy_base_volume: String,
+    #[serde(rename = "Q")]
+    pub taker_buy_quote_volume: String,
+    #[serde(rename = "B")]
+    pub ignore: String,
+}
+
 /// Error types for WebSocket operations
 #[derive(Debug, thiserror::Error)]
 #[allow(clippy::enum_variant_names)]

@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow};
 use tracing::{debug, info, warn};
 
 use super::types::{DepthSnapshot, Symbol, Ticker24hr};
+use crate::market_data::DailyCandle;
 
 /// Binance REST API client
 pub struct BinanceRestClient {
@@ -194,6 +195,64 @@ impl BinanceRestClient {
         }
 
         Ok(prices)
+    }
+
+    /// Get daily klines (1d interval) for a symbol
+    pub async fn get_daily_klines(
+        &self,
+        symbol: &str,
+        limit: Option<u16>,
+    ) -> Result<Vec<DailyCandle>> {
+        let clamped_limit = limit.unwrap_or(90).clamp(1, 1000);
+        let url = format!(
+            "{}/api/v3/klines?symbol={}&interval=1d&limit={}",
+            self.base_url, symbol, clamped_limit
+        );
+
+        debug!(
+            "Fetching daily klines from: {} (limit={})",
+            url, clamped_limit
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to send HTTP request: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("HTTP error {}: {}", status, body));
+        }
+
+        let rows: Vec<Vec<serde_json::Value>> = response
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse daily klines: {}", e))?;
+
+        let mut candles = Vec::with_capacity(rows.len());
+        for (idx, row) in rows.iter().enumerate() {
+            match DailyCandle::try_from_rest_row(row) {
+                Ok(candle) => candles.push(candle),
+                Err(err) => {
+                    warn!(
+                        "Skipping malformed kline row {} for {}: {}",
+                        idx, symbol, err
+                    );
+                }
+            }
+        }
+
+        info!(
+            "Successfully fetched {} daily klines for {}",
+            candles.len(),
+            symbol
+        );
+
+        Ok(candles)
     }
 }
 
