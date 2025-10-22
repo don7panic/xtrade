@@ -11,7 +11,9 @@ use tracing::{debug, error, info, warn};
 use crate::binance::BinanceRestClient;
 use crate::binance::types::{BinanceMessage, ConnectionStatus, OrderBook};
 
+mod daily_candle;
 mod symbol_subscription;
+pub use daily_candle::{DEFAULT_DAILY_CANDLE_LIMIT, DailyCandle};
 pub use symbol_subscription::SymbolSubscription;
 
 /// Subscription status for a symbol
@@ -52,6 +54,11 @@ pub enum MarketEvent {
     Error {
         symbol: String,
         error: String,
+    },
+    DailyCandleUpdate {
+        symbol: String,
+        candles: Vec<DailyCandle>,
+        is_snapshot: bool,
     },
 }
 

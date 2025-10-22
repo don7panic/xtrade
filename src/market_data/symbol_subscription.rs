@@ -1,17 +1,22 @@
 //! Symbol subscription management module
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::{ControlMessage, MarketEvent};
-use crate::binance::types::{BinanceMessage, ErrorSeverity, OrderBook, OrderBookError};
+use crate::binance::types::{
+    BinanceMessage, ErrorSeverity, KlineStreamEvent, OrderBook, OrderBookError,
+};
 use crate::binance::{BinanceRestClient, BinanceWebSocket};
+use crate::market_data::{DEFAULT_DAILY_CANDLE_LIMIT, DailyCandle};
 
 /// Symbol subscription manager for individual trading pairs
 pub struct SymbolSubscription {
     symbol: String,
     orderbook: OrderBook,
+    daily_candles: Vec<DailyCandle>,
+    daily_candle_limit: usize,
     control_rx: mpsc::UnboundedReceiver<ControlMessage>,
     event_tx: mpsc::UnboundedSender<MarketEvent>,
     ws: BinanceWebSocket,
@@ -39,6 +44,8 @@ impl SymbolSubscription {
         Ok(Self {
             symbol,
             orderbook,
+            daily_candles: Vec::new(),
+            daily_candle_limit: DEFAULT_DAILY_CANDLE_LIMIT,
             control_rx,
             event_tx,
             ws,
@@ -104,6 +111,30 @@ impl SymbolSubscription {
             return Err(e);
         }
 
+        // Subscribe to daily kline stream
+        if let Err(e) = self.ws.subscribe_kline(&self.symbol, "1d").await {
+            error!(
+                "Failed to subscribe to kline stream for {}: {}",
+                self.symbol, e
+            );
+            return Err(e);
+        }
+
+        // Preload historical daily candles
+        if let Err(e) = self.load_initial_daily_candles().await {
+            warn!("Failed to preload daily candles for {}: {}", self.symbol, e);
+
+            if let Err(send_err) = self.event_tx.send(MarketEvent::Error {
+                symbol: self.symbol.clone(),
+                error: format!("Failed to preload daily candles: {}", e),
+            }) {
+                error!(
+                    "Failed to send preload error event for {}: {}",
+                    self.symbol, send_err
+                );
+            }
+        }
+
         // Fetch initial snapshot
         match self.orderbook.fetch_snapshot(&self.rest_client).await {
             Ok(_) => {
@@ -138,6 +169,39 @@ impl SymbolSubscription {
                 self.symbol, e
             );
         }
+
+        Ok(())
+    }
+
+    async fn load_initial_daily_candles(&mut self) -> Result<()> {
+        let limit = self.daily_candle_limit as u16;
+        let candles = self
+            .rest_client
+            .get_daily_klines(&self.symbol, Some(limit))
+            .await?;
+
+        if candles.is_empty() {
+            return Err(anyhow!("no candles returned for {}", self.symbol));
+        }
+
+        self.daily_candles = candles;
+
+        if let Err(e) = self.event_tx.send(MarketEvent::DailyCandleUpdate {
+            symbol: self.symbol.clone(),
+            candles: self.daily_candles.clone(),
+            is_snapshot: true,
+        }) {
+            error!(
+                "Failed to send daily candle snapshot for {}: {}",
+                self.symbol, e
+            );
+        }
+
+        info!(
+            "Preloaded {} daily candles for {}",
+            self.daily_candles.len(),
+            self.symbol
+        );
 
         Ok(())
     }
@@ -250,6 +314,16 @@ impl SymbolSubscription {
                     }
                 }
             }
+            stream if stream.contains("kline") => {
+                match serde_json::from_value::<KlineStreamEvent>(binance_msg.data) {
+                    Ok(kline_event) => {
+                        self.handle_kline_event(kline_event).await;
+                    }
+                    Err(e) => {
+                        error!("Failed to parse kline event for {}: {}", self.symbol, e);
+                    }
+                }
+            }
             _ => {
                 debug!(
                     "Unhandled message type for {}: {}",
@@ -257,6 +331,85 @@ impl SymbolSubscription {
                 );
             }
         }
+    }
+
+    async fn handle_kline_event(&mut self, event: KlineStreamEvent) {
+        if event.kline.interval != "1d" {
+            debug!(
+                "Ignoring non-daily kline interval {} for {}",
+                event.kline.interval, self.symbol
+            );
+            return;
+        }
+
+        match Self::build_daily_candle(&event) {
+            Ok(candle) => {
+                let updated = self.upsert_daily_candle(candle);
+
+                if let Err(e) = self.event_tx.send(MarketEvent::DailyCandleUpdate {
+                    symbol: self.symbol.clone(),
+                    candles: vec![updated.clone()],
+                    is_snapshot: false,
+                }) {
+                    error!(
+                        "Failed to send daily candle update for {}: {}",
+                        self.symbol, e
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to convert kline event into candle for {}: {}",
+                    self.symbol, e
+                );
+            }
+        }
+    }
+
+    fn build_daily_candle(event: &KlineStreamEvent) -> Result<DailyCandle> {
+        let kline = &event.kline;
+        let open = Self::parse_f64_str(&kline.open, "open")?;
+        let high = Self::parse_f64_str(&kline.high, "high")?;
+        let low = Self::parse_f64_str(&kline.low, "low")?;
+        let close = Self::parse_f64_str(&kline.close, "close")?;
+        let volume = Self::parse_f64_str(&kline.volume, "volume")?;
+
+        Ok(DailyCandle::new(
+            kline.start_time,
+            kline.close_time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            kline.is_final,
+        ))
+    }
+
+    fn upsert_daily_candle(&mut self, candle: DailyCandle) -> DailyCandle {
+        if let Some(existing) = self
+            .daily_candles
+            .iter_mut()
+            .find(|existing| existing.open_time_ms == candle.open_time_ms)
+        {
+            *existing = candle;
+            return existing.clone();
+        }
+
+        self.daily_candles.push(candle.clone());
+
+        if self.daily_candles.len() > self.daily_candle_limit {
+            let overflow = self.daily_candles.len() - self.daily_candle_limit;
+            self.daily_candles.drain(0..overflow);
+        }
+
+        candle
+    }
+
+    fn parse_f64_str(value: &str, field: &str) -> Result<f64> {
+        value
+            .parse::<f64>()
+            .map_err(|e| anyhow!("failed to parse {} value '{}': {}", field, value, e))
     }
 
     async fn handle_orderbook_error(&mut self, err: OrderBookError) {
@@ -433,5 +586,68 @@ impl SymbolSubscription {
             WebSocketError::ParseError(_) => false, // Parsing errors don't require reconnection
             WebSocketError::JsonError(_) => false,  // JSON errors don't require reconnection
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binance::types::KlineData;
+
+    fn sample_kline_event(is_final: bool) -> KlineStreamEvent {
+        KlineStreamEvent {
+            event_type: "kline".to_string(),
+            event_time: 1,
+            symbol: "TESTUSDT".to_string(),
+            kline: KlineData {
+                start_time: 1,
+                close_time: 2,
+                symbol: "TESTUSDT".to_string(),
+                interval: "1d".to_string(),
+                first_trade_id: 10,
+                last_trade_id: 20,
+                open: "100.0".to_string(),
+                close: "110.0".to_string(),
+                high: "115.0".to_string(),
+                low: "95.0".to_string(),
+                volume: "123.45".to_string(),
+                number_of_trades: 42,
+                is_final,
+                quote_volume: "0".to_string(),
+                taker_buy_base_volume: "0".to_string(),
+                taker_buy_quote_volume: "0".to_string(),
+                ignore: "0".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn build_daily_candle_converts_kline_values() {
+        let event = sample_kline_event(false);
+        let candle = SymbolSubscription::build_daily_candle(&event).expect("should parse");
+
+        assert_eq!(candle.open_time_ms, 1);
+        assert_eq!(candle.close_time_ms, 2);
+        assert!((candle.open - 100.0).abs() < 1e-9);
+        assert!((candle.close - 110.0).abs() < 1e-9);
+        assert!((candle.high - 115.0).abs() < 1e-9);
+        assert!((candle.low - 95.0).abs() < 1e-9);
+        assert!((candle.volume - 123.45).abs() < 1e-9);
+        assert!(!candle.is_closed);
+    }
+
+    #[test]
+    fn build_daily_candle_respects_final_flag() {
+        let event = sample_kline_event(true);
+        let candle = SymbolSubscription::build_daily_candle(&event).expect("should parse");
+        assert!(candle.is_closed);
+    }
+
+    #[test]
+    fn build_daily_candle_errors_on_bad_numbers() {
+        let mut event = sample_kline_event(false);
+        event.kline.open = "bad".to_string();
+        let result = SymbolSubscription::build_daily_candle(&event);
+        assert!(result.is_err());
     }
 }

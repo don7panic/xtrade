@@ -8,7 +8,7 @@
 ## 核心交付物（对齐 PRD 验收）
 - 会话入口：`xtrade` 启动欢迎页、命令帮助、订阅概览，支持 `add/remove/pairs/focus/stats/logs/config/quit` 等核心命令。
 - 市场数据引擎：Binance 适配器、OrderBook 快照初始化 + 序列校验的 diff 管线、消息去重与延迟统计。
-- 交互层：基于 `ratatui` 的多交易对面板、OrderBook 表格、sparkline、状态栏、通知区、日志视图。
+- 交互层：基于 `ratatui` 的多交易对面板、OrderBook 表格、价格趋势折线图面板、状态栏、通知区、日志视图。
 - 稳定性与监控：断线重连、心跳检测、metrics（延迟、吞吐、重连次数）、结构化日志、配置热更新能力。
 - 质量保障：完整的单元/集成测试、性能验证脚本、文档（使用手册 + 配置指南）。
 
@@ -56,10 +56,10 @@
 
 ## Week 3（Day 15-21）：TUI 体验与端到端验收
 - **UI 布局与交互**
-  - 根据架构图实现多面板布局：行情概要、OrderBook、sparkline、指标、日志/通知。
+  - 根据架构图实现多面板布局：行情概要、OrderBook、价格趋势折线图、指标、日志/通知。
 - **实时数据绑定**
   - 将 MarketDataManager 事件总线接入 State Store → UI Renderer，支持 100ms 节流与脏标记刷新。
-  - 展示多交易对并发数据、颜色区分涨跌、sparkline 环形缓冲限制内存。
+  - 展示多交易对并发数据、颜色区分涨跌、价格折线图环形缓冲限制内存，并基于窗口内 min/max 动态归一化纵轴。
 - **会话内观测能力**
   - `stats` 面板展示延迟分布、消息速率、重连次数；`logs` 面板展示最近结构化日志。
   - 支持 `config refresh-rate` 等命令热调参数并即时反馈。
@@ -73,7 +73,7 @@
   - Demo 演练：从启动 → 订阅多个交易对 → 切换面板 → 查看 stats/logs → 优雅退出。
 
 **Week 3 实施进展（当前迭代）**
-- `ratatui` 多面板布局落地，行情/OrderBook/Sparkline/指标/日志区域实时刷新。
+- `ratatui` 多面板布局落地，行情/OrderBook/价格折线图/指标/日志区域实时刷新。
 - UI 渲染改为事件驱动 + 100ms 节流，加入 Tab/Shift+Tab、Space、Shift+L、`/` 等快捷键。
 - 市场事件与 `MetricsCollector` 打通，定期推送 `ConnectionMetrics` 到 `stats` 面板。
 - `config set refresh_rate_ms`、`config reset` 等指令即时生效，UI 自动调节刷新节奏与深度配置。

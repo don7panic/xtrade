@@ -10,14 +10,13 @@ use crossterm::event::{self, Event};
 
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::market_data::MarketDataManager;
-use crate::market_data::MarketEvent;
+use crate::market_data::{DEFAULT_DAILY_CANDLE_LIMIT, MarketDataManager, MarketEvent};
 use crate::metrics::ConnectionStatus as MetricsConnectionStatus;
 use crate::session::action_channel::{SessionEvent, StatusInfo};
 use crate::session::session_manager::SessionStats;
 
-use super::AppState;
 use super::tui::{Tui, UiAction, handle_key_event};
+use super::{AppState, PricePoint};
 
 /// UI Manager for managing the terminal interface
 pub struct UIManager {
@@ -93,7 +92,7 @@ impl UIManager {
         let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
         let (_market_event_tx, market_event_rx) = mpsc::unbounded_channel();
 
-        let refresh_interval = Duration::from_millis(config.refresh_rate_ms.max(16).min(1000));
+        let refresh_interval = Duration::from_millis(config.refresh_rate_ms.clamp(16, 1000));
 
         Self {
             market_manager,
@@ -285,7 +284,7 @@ impl UIManager {
         self.render_state.should_redraw = true;
         self.last_render = Instant::now()
             .checked_sub(self.refresh_interval)
-            .unwrap_or_else(|| Instant::now());
+            .unwrap_or_else(Instant::now);
 
         while !self.render_state.should_quit && !self.app_state.should_quit {
             // Process async events from the session layer
@@ -604,12 +603,15 @@ impl UIManager {
             MarketEvent::PriceUpdate {
                 symbol,
                 price,
-                time: _,
+                time,
             } => {
                 // Update market data state
                 if let Some(market_data) = self.app_state.market_data.get_mut(&symbol) {
                     market_data.price = price;
-                    market_data.price_history.push(price);
+                    market_data.price_history.push(PricePoint {
+                        timestamp_ms: time,
+                        price,
+                    });
 
                     // Keep history size manageable
                     let max_points = self.config.ui.sparkline_points.max(2);
@@ -629,7 +631,11 @@ impl UIManager {
                             high_24h: 0.0,
                             low_24h: 0.0,
                             orderbook: None,
-                            price_history: vec![price],
+                            price_history: vec![PricePoint {
+                                timestamp_ms: time,
+                                price,
+                            }],
+                            daily_candles: Vec::new(),
                         },
                     );
                     self.render_state
@@ -670,6 +676,62 @@ impl UIManager {
                         MetricsConnectionStatus::Error(err)
                     }
                 };
+            }
+            MarketEvent::DailyCandleUpdate {
+                symbol,
+                mut candles,
+                is_snapshot,
+            } => {
+                use std::collections::hash_map::Entry;
+
+                let entry = self.app_state.market_data.entry(symbol.clone());
+                let market_data = match entry {
+                    Entry::Occupied(occupied) => occupied.into_mut(),
+                    Entry::Vacant(vacant) => {
+                        let mut state = super::MarketDataState::default();
+                        state.symbol = symbol.clone();
+                        vacant.insert(state)
+                    }
+                };
+
+                if is_snapshot {
+                    market_data.daily_candles = candles;
+                    if market_data.daily_candles.len() > DEFAULT_DAILY_CANDLE_LIMIT {
+                        let overflow = market_data.daily_candles.len() - DEFAULT_DAILY_CANDLE_LIMIT;
+                        market_data.daily_candles.drain(0..overflow);
+                    }
+
+                    market_data
+                        .daily_candles
+                        .sort_by_key(|candle| candle.open_time_ms);
+
+                    self.render_state.queue_message(format!(
+                        "Loaded {} daily candles for {}",
+                        market_data.daily_candles.len(),
+                        symbol
+                    ));
+                } else {
+                    for candle in candles.drain(..) {
+                        if let Some(existing) = market_data
+                            .daily_candles
+                            .iter_mut()
+                            .find(|existing| existing.open_time_ms == candle.open_time_ms)
+                        {
+                            *existing = candle;
+                        } else {
+                            market_data.daily_candles.push(candle);
+                        }
+                    }
+
+                    if market_data.daily_candles.len() > DEFAULT_DAILY_CANDLE_LIMIT {
+                        let overflow = market_data.daily_candles.len() - DEFAULT_DAILY_CANDLE_LIMIT;
+                        market_data.daily_candles.drain(0..overflow);
+                    }
+
+                    market_data
+                        .daily_candles
+                        .sort_by_key(|candle| candle.open_time_ms);
+                }
             }
             MarketEvent::Error { symbol, error } => {
                 let message = format!("Market error for {}: {}", symbol, error);
