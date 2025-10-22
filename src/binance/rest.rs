@@ -1,6 +1,8 @@
 //! Binance REST API client implementation
 
 use anyhow::{Result, anyhow};
+use serde::Deserialize;
+use serde::de::{Error as DeError, IgnoredAny};
 use tracing::{debug, info, warn};
 
 use super::types::{DepthSnapshot, Symbol, Ticker24hr};
@@ -228,23 +230,12 @@ impl BinanceRestClient {
             return Err(anyhow!("HTTP error {}: {}", status, body));
         }
 
-        let rows: Vec<Vec<serde_json::Value>> = response
+        let rows: Vec<RestKlineRow> = response
             .json()
             .await
             .map_err(|e| anyhow!("Failed to parse daily klines: {}", e))?;
 
-        let mut candles = Vec::with_capacity(rows.len());
-        for (idx, row) in rows.iter().enumerate() {
-            match DailyCandle::try_from_rest_row(row) {
-                Ok(candle) => candles.push(candle),
-                Err(err) => {
-                    warn!(
-                        "Skipping malformed kline row {} for {}: {}",
-                        idx, symbol, err
-                    );
-                }
-            }
-        }
+        let candles: Vec<DailyCandle> = rows.into_iter().map(DailyCandle::from).collect();
 
         info!(
             "Successfully fetched {} daily klines for {}",
@@ -266,4 +257,105 @@ pub struct ExchangeInfo {
 #[derive(Debug, serde::Deserialize)]
 pub struct TimeResponse {
     pub server_time: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestKlineRow(
+    #[serde(deserialize_with = "deserialize_u64_from_any")] u64,
+    #[serde(deserialize_with = "deserialize_f64_from_any")] f64,
+    #[serde(deserialize_with = "deserialize_f64_from_any")] f64,
+    #[serde(deserialize_with = "deserialize_f64_from_any")] f64,
+    #[serde(deserialize_with = "deserialize_f64_from_any")] f64,
+    #[serde(deserialize_with = "deserialize_f64_from_any")] f64,
+    #[serde(deserialize_with = "deserialize_u64_from_any")] u64,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+);
+
+impl From<RestKlineRow> for DailyCandle {
+    fn from(row: RestKlineRow) -> Self {
+        let RestKlineRow(open_time_ms, open, high, low, close, volume, close_time_ms, ..) = row;
+        DailyCandle::new(
+            open_time_ms,
+            close_time_ms,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            true,
+        )
+    }
+}
+
+fn deserialize_u64_from_any<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(num) => num
+            .as_u64()
+            .ok_or_else(|| DeError::custom("failed to read numeric u64 value")),
+        serde_json::Value::String(s) => s
+            .parse::<u64>()
+            .map_err(|e| DeError::custom(format!("failed to parse u64 '{}': {}", s, e))),
+        _ => Err(DeError::custom("expected number or string for u64")),
+    }
+}
+
+fn deserialize_f64_from_any<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(num) => num
+            .as_f64()
+            .ok_or_else(|| DeError::custom("failed to read numeric f64 value")),
+        serde_json::Value::String(s) => s
+            .parse::<f64>()
+            .map_err(|e| DeError::custom(format!("failed to parse f64 '{}': {}", s, e))),
+        _ => Err(DeError::custom("expected number or string for f64")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rest_kline_row_deserializes_from_payload() {
+        let payload = json!([
+            1_700_000_000_000u64,
+            "100.12",
+            "105.55",
+            "98.01",
+            "103.78",
+            "1234.56",
+            1_700_086_400_000u64,
+            "0",
+            "0",
+            308,
+            "0",
+            "0"
+        ]);
+
+        let row: RestKlineRow =
+            serde_json::from_value(payload).expect("row should deserialize from payload");
+        let candle: DailyCandle = row.into();
+
+        assert_eq!(candle.open_time_ms, 1_700_000_000_000u64);
+        assert_eq!(candle.close_time_ms, 1_700_086_400_000u64);
+        assert!((candle.open - 100.12).abs() < f64::EPSILON);
+        assert!((candle.high - 105.55).abs() < f64::EPSILON);
+        assert!((candle.low - 98.01).abs() < f64::EPSILON);
+        assert!((candle.close - 103.78).abs() < f64::EPSILON);
+        assert!((candle.volume - 1234.56).abs() < f64::EPSILON);
+        assert!(candle.is_closed);
+    }
 }

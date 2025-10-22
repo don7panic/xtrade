@@ -53,6 +53,7 @@ pub struct BinanceConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct UiConfig {
     /// Enable colors in TUI
     pub enable_colors: bool,
@@ -62,6 +63,9 @@ pub struct UiConfig {
 
     /// Maximum price history points for sparkline
     pub sparkline_points: usize,
+
+    /// Minimum seconds between kline redraws from streaming updates
+    pub kline_refresh_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -103,6 +107,7 @@ impl Default for UiConfig {
             enable_colors: true,
             update_rate_fps: 20,
             sparkline_points: 60,
+            kline_refresh_secs: 60,
         }
     }
 }
@@ -224,6 +229,13 @@ impl Config {
                 self.ui.sparkline_points = value;
             }
         }
+
+        // XTRADE_UI_KLINE_REFRESH_SECS - kline refresh throttle
+        if let Ok(refresh) = env::var("XTRADE_UI_KLINE_REFRESH_SECS") {
+            if let Ok(value) = refresh.parse::<u64>() {
+                self.ui.kline_refresh_secs = value.max(1);
+            }
+        }
     }
 
     /// Save configuration to file
@@ -264,6 +276,10 @@ impl Config {
 
         if self.log.file_path.trim().is_empty() {
             anyhow::bail!("Log file path must not be empty");
+        }
+
+        if self.ui.kline_refresh_secs == 0 {
+            anyhow::bail!("ui.kline_refresh_secs must be greater than 0");
         }
 
         // Validate symbol format (basic check)

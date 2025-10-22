@@ -15,6 +15,7 @@ use crate::binance::types::OrderBook;
 use crate::market_data::DailyCandle;
 use crate::metrics::ConnectionMetrics;
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 /// Application state for UI components
 #[derive(Debug, Clone)]
@@ -43,6 +44,8 @@ pub struct MarketDataState {
     pub orderbook: Option<OrderBook>,
     pub price_history: Vec<PricePoint>,
     pub daily_candles: Vec<DailyCandle>,
+    pub kline_render_cache: Option<KlineRenderCache>,
+    pub last_kline_refresh: Option<Instant>,
 }
 
 /// Historical price sample captured for trend chart
@@ -50,6 +53,28 @@ pub struct MarketDataState {
 pub struct PricePoint {
     pub timestamp_ms: u64,
     pub price: f64,
+}
+
+/// Cached candle samples prepared for rendering
+#[derive(Debug, Clone)]
+pub struct KlineRenderCache {
+    pub width: u16,
+    pub samples: Vec<CandleSample>,
+    pub min_price: f64,
+    pub max_price: f64,
+    pub total_span_ms: u64,
+}
+
+/// Simplified candle information used for rendering
+#[derive(Debug, Clone)]
+pub struct CandleSample {
+    pub open_time_ms: u64,
+    pub close_time_ms: u64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub is_closed: bool,
 }
 
 /// Input mode for the TUI command palette
@@ -147,6 +172,116 @@ impl AppState {
     }
 }
 
+impl MarketDataState {
+    /// Invalidate the cached kline render data
+    pub fn invalidate_kline_cache(&mut self) {
+        self.kline_render_cache = None;
+    }
+
+    /// Ensure the render cache is populated for the given width
+    pub fn ensure_kline_cache(&mut self, width: u16) -> Option<&KlineRenderCache> {
+        if width < 4 {
+            self.kline_render_cache = None;
+            return None;
+        }
+
+        let needs_rebuild = self
+            .kline_render_cache
+            .as_ref()
+            .map_or(true, |cache| cache.width != width);
+
+        if needs_rebuild {
+            self.rebuild_kline_cache(width);
+        }
+
+        self.kline_render_cache.as_ref()
+    }
+
+    fn rebuild_kline_cache(&mut self, width: u16) {
+        if width < 4 || self.daily_candles.is_empty() {
+            self.kline_render_cache = None;
+            return;
+        }
+
+        let max_candles = std::cmp::max(1, (width / 2) as usize);
+        let len = self.daily_candles.len();
+        let take = len.min(max_candles);
+        let start = len - take;
+
+        let samples: Vec<CandleSample> = self.daily_candles[start..]
+            .iter()
+            .map(CandleSample::from)
+            .collect();
+
+        self.kline_render_cache = KlineRenderCache::from_samples(width, samples);
+    }
+
+    /// Update kline refresh bookkeeping and return whether a redraw is due.
+    pub fn update_kline_refresh(&mut self, now: Instant, interval: Duration, force: bool) -> bool {
+        if force {
+            self.last_kline_refresh = Some(now);
+            return true;
+        }
+
+        let due = self
+            .last_kline_refresh
+            .map(|last| now.duration_since(last) >= interval)
+            .unwrap_or(true);
+
+        if due {
+            self.last_kline_refresh = Some(now);
+        }
+
+        due
+    }
+}
+
+impl KlineRenderCache {
+    fn from_samples(width: u16, samples: Vec<CandleSample>) -> Option<KlineRenderCache> {
+        if samples.is_empty() {
+            return None;
+        }
+
+        let mut min_price = f64::INFINITY;
+        let mut max_price = f64::NEG_INFINITY;
+
+        for sample in &samples {
+            if sample.low < min_price {
+                min_price = sample.low;
+            }
+            if sample.high > max_price {
+                max_price = sample.high;
+            }
+        }
+
+        let first = samples.first().unwrap();
+        let last = samples.last().unwrap();
+        let total_span_ms = last.close_time_ms.saturating_sub(first.open_time_ms).max(1);
+
+        Some(KlineRenderCache {
+            width,
+            samples,
+            min_price,
+            max_price,
+            total_span_ms,
+        })
+    }
+}
+
+impl From<&DailyCandle> for CandleSample {
+    fn from(value: &DailyCandle) -> Self {
+        Self {
+            open_time_ms: value.open_time_ms,
+            close_time_ms: value.close_time_ms,
+            open: value.open,
+            high: value.high,
+            low: value.low,
+            close: value.close,
+            is_closed: value.is_closed,
+        }
+    }
+}
+
 impl Default for MarketDataState {
     fn default() -> Self {
         Self {
@@ -159,6 +294,8 @@ impl Default for MarketDataState {
             orderbook: None,
             price_history: Vec::new(),
             daily_candles: Vec::new(),
+            kline_render_cache: None,
+            last_kline_refresh: None,
         }
     }
 }
@@ -225,5 +362,73 @@ mod tests {
 
         app.toggle_pause();
         assert!(!app.paused);
+    }
+
+    #[test]
+    fn kline_cache_limits_samples_by_width() {
+        let mut state = MarketDataState::default();
+        state.symbol = "TESTUSDT".to_string();
+
+        for idx in 0..20 {
+            state.daily_candles.push(DailyCandle::new(
+                1_000 + idx * 1_000,
+                1_500 + idx * 1_000,
+                100.0 + idx as f64,
+                105.0 + idx as f64,
+                95.0 + idx as f64,
+                102.0 + idx as f64,
+                10.0,
+                true,
+            ));
+        }
+
+        let cache = state.ensure_kline_cache(12).expect("cache should build");
+        // Width 12 allows at most 6 candles (width/2)
+        assert_eq!(cache.samples.len(), 6);
+        // Expect the cache to use the most recent candles
+        assert_eq!(
+            cache.samples.first().unwrap().open_time_ms,
+            1_000 + 14 * 1_000
+        );
+        assert_eq!(
+            cache.samples.last().unwrap().close_time_ms,
+            1_500 + 19 * 1_000
+        );
+    }
+
+    #[test]
+    fn kline_cache_invalidates_on_request() {
+        let mut state = MarketDataState::default();
+        state.daily_candles.push(DailyCandle::new(
+            1_000, 2_000, 100.0, 110.0, 90.0, 105.0, 50.0, true,
+        ));
+
+        assert!(state.ensure_kline_cache(10).is_some());
+        assert!(state.kline_render_cache.is_some());
+
+        state.invalidate_kline_cache();
+        assert!(state.kline_render_cache.is_none());
+    }
+
+    #[test]
+    fn kline_cache_handles_tiny_width() {
+        let mut state = MarketDataState::default();
+        state.daily_candles.push(DailyCandle::new(
+            1_000, 2_000, 100.0, 110.0, 90.0, 105.0, 50.0, true,
+        ));
+
+        assert!(state.ensure_kline_cache(2).is_none());
+    }
+
+    #[test]
+    fn kline_refresh_throttles_and_forces() {
+        let mut state = MarketDataState::default();
+        let interval = Duration::from_secs(60);
+        let base = Instant::now();
+
+        assert!(state.update_kline_refresh(base, interval, false));
+        assert!(!state.update_kline_refresh(base + Duration::from_secs(10), interval, false,));
+        assert!(state.update_kline_refresh(base + Duration::from_secs(61), interval, false,));
+        assert!(state.update_kline_refresh(base + Duration::from_secs(62), interval, true,));
     }
 }

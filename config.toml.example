@@ -10,7 +10,7 @@ refresh_rate_ms = 100
 # OrderBook depth to display (number of price levels)
 orderbook_depth = 20
 
-# Enable price sparkline charts in TUI
+# Enable Price Trend panel (daily candles) in TUI
 enable_sparkline = true
 
 # Logging level (trace, debug, info, warn, error)
@@ -40,28 +40,11 @@ max_reconnect_attempts = 10
 # Enable colors in terminal output
 enable_colors = true
 
-# TUI update frequency in milliseconds
-update_interval_ms = 100
+# TUI render cadence (frames per second)
+update_rate_fps = 20
 
-# Maximum number of log entries to keep in memory
-max_log_entries = 1000
+# Cached points for legacy intraday sparkline (price history panel)
+sparkline_points = 60
 
-# Default TUI theme (dark, light, custom)
-theme = "dark"
-
-[metrics]
-# Enable performance metrics collection
-enabled = true
-
-# Metrics collection interval in milliseconds
-collection_interval_ms = 1000
-
-# Keep metrics history for this many seconds
-history_duration_seconds = 300
-
-[sparkline]
-# Number of price points to keep for sparkline
-history_size = 60
-
-# Sparkline update interval in seconds
-update_interval_seconds = 1
+# Minimum seconds between Price Trend redraws from streaming updates
+kline_refresh_secs = 60

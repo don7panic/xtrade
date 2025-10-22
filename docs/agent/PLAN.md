@@ -1,18 +1,21 @@
 # XTrade 第一阶段 Sprint 计划（数据获取与展示）
 
 ## Sprint 目标
+
 - 交付一个以 `xtrade` 命令启动的长生命周期交互式会话，支持交易对订阅管理、实时行情浏览与状态查询。
 - 构建可靠的 Binance Spot 市场数据管线，包含快照 + 增量深度、aggTrade、24h ticker，并对数据完整性和延迟进行监控。
 - 提供多面板 TUI 体验，展示多交易对行情、OrderBook、性能指标与日志，满足 PRD 中的性能与稳定性验收标准。
 
 ## 核心交付物（对齐 PRD 验收）
+
 - 会话入口：`xtrade` 启动欢迎页、命令帮助、订阅概览，支持 `add/remove/pairs/focus/stats/logs/config/quit` 等核心命令。
 - 市场数据引擎：Binance 适配器、OrderBook 快照初始化 + 序列校验的 diff 管线、消息去重与延迟统计。
-- 交互层：基于 `ratatui` 的多交易对面板、OrderBook 表格、价格趋势折线图面板、状态栏、通知区、日志视图。
+- 交互层：基于 `ratatui` 的多交易对面板、OrderBook 表格、Price Trend 日线蜡烛图面板、状态栏、通知区、日志视图。
 - 稳定性与监控：断线重连、心跳检测、metrics（延迟、吞吐、重连次数）、结构化日志、配置热更新能力。
 - 质量保障：完整的单元/集成测试、性能验证脚本、文档（使用手册 + 配置指南）。
 
 ## Week 1（Day 1-7）：基础框架与会话入口
+
 - **工程与运行时骨架**
   - 初始化工作空间模块（`cli/`, `config/`, `binance/`, `market_data/`, `ui/`, `metrics/`）。
   - 配置 `Cargo.toml` 依赖、Makefile 目标、lint/format 管线。
@@ -34,6 +37,7 @@
   - CI 通过 `make fmt`, `cargo clippy -- -D warnings`。
 
 ## Week 2（Day 8-14）：市场数据引擎与韧性
+
 - **OrderBook 管线完成度**
   - 实现 snapshot 初始化、diff 序列（`U/u`）校验与缺口修复，过时消息丢弃，零数量档位删除。
   - 构建 `OrderBook` 内存模型（`BTreeMap` + depth 限制），维护 `best bid/ask`。
@@ -55,11 +59,12 @@
   - metrics 日志可见延迟与吞吐指标，异常时触发告警日志。
 
 ## Week 3（Day 15-21）：TUI 体验与端到端验收
+
 - **UI 布局与交互**
-  - 根据架构图实现多面板布局：行情概要、OrderBook、价格趋势折线图、指标、日志/通知。
+  - 根据架构图实现多面板布局：行情概要、OrderBook、Price Trend 蜡烛图、指标、日志/通知。
 - **实时数据绑定**
   - 将 MarketDataManager 事件总线接入 State Store → UI Renderer，支持 100ms 节流与脏标记刷新。
-  - 展示多交易对并发数据、颜色区分涨跌、价格折线图环形缓冲限制内存，并基于窗口内 min/max 动态归一化纵轴。
+  - 展示多交易对并发数据、颜色区分涨跌、Price Trend 蜡烛图按面板宽度抽样并基于窗口内 min/max 动态归一化纵轴。
 - **会话内观测能力**
   - `stats` 面板展示延迟分布、消息速率、重连次数；`logs` 面板展示最近结构化日志。
   - 支持 `config refresh-rate` 等命令热调参数并即时反馈。
@@ -73,25 +78,30 @@
   - Demo 演练：从启动 → 订阅多个交易对 → 切换面板 → 查看 stats/logs → 优雅退出。
 
 **Week 3 实施进展（当前迭代）**
-- `ratatui` 多面板布局落地，行情/OrderBook/价格折线图/指标/日志区域实时刷新。
+
+- `ratatui` 多面板布局落地，行情/OrderBook/Price Trend 蜡烛图/指标/日志区域实时刷新。
+- Price Trend 面板接入 Binance 日线 kline，支持本地缓存、宽度抽样与 `ui.kline_refresh_secs` 节流（默认 60s）以避免高频抖动。
 - UI 渲染改为事件驱动 + 100ms 节流，加入 Tab/Shift+Tab、Space、Shift+L、`/` 等快捷键。
 - 市场事件与 `MetricsCollector` 打通，定期推送 `ConnectionMetrics` 到 `stats` 面板。
 - `config set refresh_rate_ms`、`config reset` 等指令即时生效，UI 自动调节刷新节奏与深度配置。
 - 日志面板聚合 Session/Market 事件，错误与告警在终端即时可见。
 
 ## 质量保障与支撑任务
+
 - 标准化流程：每日确保 `make fmt`, `cargo test`, `cargo clippy` 通过；重要模块引入 `#[tokio::test]` 异步测试。
 - 性能基准：为核心循环添加 `criterion` 或自定义基准，记录消息处理耗时。
 - 监控验证：提供脚本对接 `metrics-exporter-prometheus`（可选）用于本地可视化。
 - 文档更新：同步维护 `docs/architecture.md` 的接口/事件总线演进，迭代 PRD 需要的新命令与视图。
 
 ## 风险与缓解
+
 - **高频渲染导致卡顿** → 提前实现节流 + 脏标记，提供暂停渲染开关。
 - **WebSocket 序列缺口** → 构建缺口检测与快照回补流程，必要时重置订阅。
 - **长连接资源泄漏** → 对任务实现超时/取消，利用 `tokio::select!` 保证优雅退出。
 - **时间压力** → 每周设置中期里程碑与 Demo，尽早验证 Binance 接入与 UI 基础，减少 Week3 堆积。
 
 ## 完成 Definition of Done
+
 - 功能满足 PRD 第一阶段范围，操作流畅、指标达标。
 - 代码通过 lint/test，关键路径有文档与日志/指标观测。
 - 交互式终端 Demo 可复现核心场景，具备性能数据与问题排查指引。

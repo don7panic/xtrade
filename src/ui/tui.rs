@@ -4,6 +4,7 @@
 
 use std::io::{Stdout, stdout};
 
+use chrono::{DateTime, Utc};
 use crossterm::{
     cursor,
     event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -14,14 +15,10 @@ use ordered_float::OrderedFloat;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    symbols,
     text::{Line, Span, Text},
-    widgets::{
-        Axis, Block, Borders, Cell, Chart, Dataset, Gauge, GraphType, List, ListItem, Paragraph,
-        Row, Table, Wrap,
-    },
+    widgets::{Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 
 use super::{AppState, InputMode, MarketDataState};
@@ -56,7 +53,7 @@ impl Tui {
     /// Render the application
     pub fn draw(
         &mut self,
-        app: &AppState,
+        app: &mut AppState,
         render_state: &crate::ui::ui_manager::RenderState,
         session_stats: &SessionStats,
         orderbook_depth: usize,
@@ -193,7 +190,7 @@ fn handle_command_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction
 
 /// Render the main TUI layout
 pub fn render_app(
-    app: &AppState,
+    app: &mut AppState,
     render_state: &crate::ui::ui_manager::RenderState,
     session_stats: &SessionStats,
     orderbook_depth: usize,
@@ -206,7 +203,7 @@ pub fn render_app(
 
 fn render_root(
     frame: &mut Frame<'_>,
-    app: &AppState,
+    app: &mut AppState,
     render_state: &crate::ui::ui_manager::RenderState,
     session_stats: &SessionStats,
     orderbook_depth: usize,
@@ -442,7 +439,7 @@ fn render_orderbook(frame: &mut Frame<'_>, area: Rect, app: &AppState, orderbook
     }
 }
 
-fn render_metrics(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn render_metrics(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(7), Constraint::Min(4)])
@@ -508,114 +505,210 @@ fn render_latency_gauges(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(gauge, sub[1]);
 }
 
-fn render_price_trend(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+fn render_price_trend(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     let block = Block::default()
         .title(" Price Trend ")
         .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let Some(symbol) = app.current_symbol() {
-        if let Some(data) = app.market_data.get(symbol) {
-            let history = &data.price_history;
-            let max_samples = inner.width.saturating_sub(2) as usize;
+    if inner.width < 12 || inner.height < 4 {
+        render_price_trend_placeholder(frame, inner);
+        return;
+    }
 
-            if max_samples >= 2 && history.len() >= 2 {
-                let start_index = history.len().saturating_sub(max_samples.max(2)); // ensure enough samples
-                let slice = &history[start_index..];
+    let Some(symbol) = app.current_symbol().cloned() else {
+        render_price_trend_placeholder(frame, inner);
+        return;
+    };
 
-                if slice.len() < 2 {
-                    // Fallback to placeholder if slice becomes too small due to tiny viewport
-                    render_price_trend_placeholder(frame, inner);
-                    return;
+    let Some(data) = app.market_data.get_mut(&symbol) else {
+        render_price_trend_placeholder(frame, inner);
+        return;
+    };
+
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(8), Constraint::Min(2)])
+        .split(inner);
+    let price_axis_area = horizontal[0];
+    let right_area = horizontal[1];
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .split(right_area);
+    let chart_area = vertical[0];
+    let time_axis_area = vertical[1];
+
+    if chart_area.width < 4 || chart_area.height < 3 {
+        render_price_trend_placeholder(frame, inner);
+        return;
+    }
+
+    let Some(cache) = data.ensure_kline_cache(chart_area.width) else {
+        render_price_trend_placeholder(frame, inner);
+        return;
+    };
+
+    if cache.samples.is_empty() {
+        render_price_trend_placeholder(frame, inner);
+        return;
+    }
+
+    let mut min_price = cache.min_price;
+    let mut max_price = cache.max_price;
+    if (max_price - min_price).abs() < f64::EPSILON {
+        max_price = min_price + 1.0;
+    } else {
+        let padding = (max_price - min_price) * 0.05;
+        min_price -= padding;
+        max_price += padding;
+    }
+
+    draw_candlesticks(frame, chart_area, &cache.samples, min_price, max_price);
+
+    // Render price axis labels (max, mid, min)
+    {
+        let buffer = frame.buffer_mut();
+        let label_style = Style::default().fg(Color::Gray);
+        let top_label = format_price_label(max_price, price_axis_area.width);
+        let mid_label = format_price_label((min_price + max_price) / 2.0, price_axis_area.width);
+        let bottom_label = format_price_label(min_price, price_axis_area.width);
+
+        buffer.set_string(price_axis_area.x, price_axis_area.y, top_label, label_style);
+
+        if price_axis_area.height > 2 {
+            let mid_y = price_axis_area.y + price_axis_area.height / 2;
+            buffer.set_string(price_axis_area.x, mid_y, mid_label, label_style);
+        }
+
+        let bottom_y = price_axis_area.y + price_axis_area.height.saturating_sub(1);
+        buffer.set_string(price_axis_area.x, bottom_y, bottom_label, label_style);
+    }
+
+    // Render time axis summary
+    let time_text = match (cache.samples.first(), cache.samples.last()) {
+        (Some(first), Some(last)) => {
+            let start = format_candle_date(first.open_time_ms);
+            let end = format_candle_date(last.close_time_ms);
+            format!("{} → {} ({} candles)", start, end, cache.samples.len())
+        }
+        _ => "Daily candle data unavailable".to_string(),
+    };
+
+    frame.render_widget(
+        Paragraph::new(time_text).alignment(Alignment::Center),
+        time_axis_area,
+    );
+}
+
+fn draw_candlesticks(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    samples: &[crate::ui::CandleSample],
+    min_price: f64,
+    max_price: f64,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+
+    let price_span = (max_price - min_price).max(f64::EPSILON);
+    let denom = (samples.len().saturating_sub(1)).max(1) as f64;
+    let width_f = (area.width - 1) as f64;
+
+    let buffer = frame.buffer_mut();
+
+    for (idx, sample) in samples.iter().enumerate() {
+        let rel_x = if samples.len() == 1 {
+            0.0
+        } else {
+            idx as f64 / denom
+        };
+        let mut x = area.x + (rel_x * width_f).round() as u16;
+        if x >= area.x + area.width {
+            x = area.x + area.width - 1;
+        }
+
+        let style = if sample.close >= sample.open {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+
+        let mut y_high = price_to_y(sample.high, min_price, price_span, area);
+        let mut y_low = price_to_y(sample.low, min_price, price_span, area);
+        if y_high > y_low {
+            std::mem::swap(&mut y_high, &mut y_low);
+        }
+
+        for y in y_high..=y_low {
+            if within(area, x, y) {
+                buffer.get_mut(x, y).set_style(style).set_symbol("│");
+            }
+        }
+
+        let mut y_open = price_to_y(sample.open, min_price, price_span, area);
+        let mut y_close = price_to_y(sample.close, min_price, price_span, area);
+        if y_open > y_close {
+            std::mem::swap(&mut y_open, &mut y_close);
+        }
+
+        let x_right = x.saturating_add(1);
+
+        if y_open == y_close {
+            if within(area, x, y_open) {
+                buffer.get_mut(x, y_open).set_style(style).set_symbol("─");
+            }
+            if within(area, x_right, y_open) {
+                buffer
+                    .get_mut(x_right, y_open)
+                    .set_style(style)
+                    .set_symbol("─");
+            }
+        } else {
+            for y in y_open..=y_close {
+                if within(area, x, y) {
+                    buffer.get_mut(x, y).set_style(style).set_symbol("█");
                 }
-
-                let first_point = slice.first().unwrap();
-                let last_point = slice.last().unwrap();
-
-                let mut min_price = f64::INFINITY;
-                let mut max_price = f64::NEG_INFINITY;
-                for point in slice.iter() {
-                    if point.price < min_price {
-                        min_price = point.price;
-                    }
-                    if point.price > max_price {
-                        max_price = point.price;
-                    }
+                if within(area, x_right, y) {
+                    buffer.get_mut(x_right, y).set_style(style).set_symbol("█");
                 }
-
-                let price_span = (max_price - min_price).max(f64::EPSILON);
-                let price_padding = (price_span * 0.05).max(0.01);
-                let y_min = min_price - price_padding;
-                let y_max = max_price + price_padding;
-
-                let total_span_ms = last_point
-                    .timestamp_ms
-                    .saturating_sub(first_point.timestamp_ms)
-                    .max(1);
-                let total_span_s = total_span_ms as f64 / 1000.0;
-
-                let mut data_points = Vec::with_capacity(slice.len());
-                for point in slice.iter() {
-                    let delta_ms = point.timestamp_ms.saturating_sub(first_point.timestamp_ms);
-                    let x = delta_ms as f64 / 1000.0;
-                    data_points.push((x, point.price));
-                }
-
-                let axis_style = Style::default().fg(Color::Gray);
-
-                let x_labels = if total_span_s < 1.0 {
-                    vec![
-                        Span::raw("0s"),
-                        Span::raw(format!("{:.2}s", total_span_s / 2.0)),
-                        Span::raw(format!("{:.2}s", total_span_s)),
-                    ]
-                } else {
-                    vec![
-                        Span::raw("0s"),
-                        Span::raw(format!("{:.0}s", total_span_s / 2.0)),
-                        Span::raw(format!("{:.0}s", total_span_s)),
-                    ]
-                };
-
-                let mid_price = min_price + price_span / 2.0;
-                let y_labels = vec![
-                    Span::raw(format!("{:.2}", min_price)),
-                    Span::raw(format!("{:.2}", mid_price)),
-                    Span::raw(format!("{:.2}", max_price)),
-                ];
-
-                let dataset = Dataset::default()
-                    .name(symbol.as_str())
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::LightCyan))
-                    .data(&data_points);
-
-                let chart = Chart::new(vec![dataset])
-                    .block(Block::default())
-                    .x_axis(
-                        Axis::default()
-                            .title("Time")
-                            .style(axis_style)
-                            .labels(x_labels)
-                            .bounds([0.0, total_span_s.max(0.01)]),
-                    )
-                    .y_axis(
-                        Axis::default()
-                            .title("Price")
-                            .style(axis_style)
-                            .labels(y_labels)
-                            .bounds([y_min, y_max.max(y_min + 0.01)]),
-                    );
-
-                frame.render_widget(chart, inner);
-                return;
             }
         }
     }
+}
 
-    render_price_trend_placeholder(frame, inner);
+fn price_to_y(price: f64, min_price: f64, price_span: f64, area: Rect) -> u16 {
+    if area.height <= 1 {
+        return area.y;
+    }
+    let normalized = ((price - min_price) / price_span).clamp(0.0, 1.0);
+    let offset = ((1.0 - normalized) * (area.height - 1) as f64).round() as u16;
+    area.y + offset.min(area.height - 1)
+}
+
+fn within(area: Rect, x: u16, y: u16) -> bool {
+    x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
+}
+
+fn format_price_label(value: f64, width: u16) -> String {
+    let mut label = format!("{:.2}", value);
+    let max_len = width as usize;
+    if max_len > 0 && label.len() > max_len {
+        label.truncate(max_len);
+    }
+    label
+}
+
+fn format_candle_date(timestamp_ms: u64) -> String {
+    let ts = timestamp_ms as i64;
+    if let Some(datetime) = DateTime::<Utc>::from_timestamp_millis(ts) {
+        datetime.format("%Y-%m-%d").to_string()
+    } else {
+        "-".to_string()
+    }
 }
 
 fn render_price_trend_placeholder(frame: &mut Frame<'_>, area: Rect) {

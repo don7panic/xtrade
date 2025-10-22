@@ -198,6 +198,7 @@ impl BinanceWebSocket {
         // Start heartbeat monitoring task
         let heartbeat_status_tx = status_tx.clone();
         let (heartbeat_shutdown_tx, mut heartbeat_shutdown_rx) = mpsc::channel(1);
+        let heartbeat_message_tx = message_tx.clone();
 
         tokio::spawn(async move {
             let mut last_heartbeat = SystemTime::now();
@@ -214,6 +215,11 @@ impl BinanceWebSocket {
                         if last_heartbeat.elapsed().unwrap_or_default() > heartbeat_timeout {
                             warn!("Heartbeat timeout detected, triggering reconnection");
                             let _ = heartbeat_status_tx.send(ConnectionStatus::Error("Heartbeat timeout".to_string()));
+                            let _ = heartbeat_message_tx
+                                .send(Err(WebSocketError::ConnectionError(
+                                    "Heartbeat timeout".to_string(),
+                                )))
+                                .await;
                             break;
                         }
                     }
