@@ -6,6 +6,13 @@
 - **里程碑周期**：约 1.5 周（8 个工作日）。
 - **关键交付物**：数据接入、状态管理、TUI 蜡烛图渲染、文档与测试。
 
+## 当前进度
+
+- ✅ **Milestone 1**：REST 历史拉取 + `DailyCandle` 结构与增量事件已落地，并附带解析单元测试。
+- ✅ **Milestone 2**：`MarketDataState` 扩展、渲染缓存抽样与刷新节流逻辑已合并，覆盖缓存裁剪测试。
+- ✅ **Milestone 3**：Price Trend 面板改为日线蜡烛图，自适应抽样、涨跌配色和刷新节流齐备。
+- ✅ **Milestone 4**：文档、配置示例与开发计划已更新，新增 `ui.kline_refresh_secs` 配置说明，`cargo fmt`/`cargo test` 已通过。
+
 ## 里程碑
 
 ### Milestone 1：数据接入与缓存（Day 1-3）

@@ -307,7 +307,7 @@ impl UIManager {
                         as u64;
 
                     tui.draw(
-                        &self.app_state,
+                        &mut self.app_state,
                         &self.render_state,
                         &self.session_stats,
                         self.config.orderbook_depth,
@@ -598,6 +598,7 @@ impl UIManager {
     /// Handle market event
     pub async fn handle_market_event(&mut self, event: MarketEvent) -> Result<()> {
         debug!("Handling market event: {:?}", event);
+        let mut should_redraw = false;
 
         match event {
             MarketEvent::PriceUpdate {
@@ -619,6 +620,7 @@ impl UIManager {
                         let overflow = market_data.price_history.len() - max_points;
                         market_data.price_history.drain(0..overflow);
                     }
+                    should_redraw = true;
                 } else {
                     // Create new market data entry
                     self.app_state.market_data.insert(
@@ -636,18 +638,22 @@ impl UIManager {
                                 price,
                             }],
                             daily_candles: Vec::new(),
+                            kline_render_cache: None,
+                            last_kline_refresh: None,
                         },
                     );
                     self.render_state
                         .queue_message(format!("Market data stream started for {}", symbol));
                     self.app_state
                         .push_log(format!("Market data stream started for {}", symbol));
+                    should_redraw = true;
                 }
             }
             MarketEvent::OrderBookUpdate { symbol, orderbook } => {
                 // Update orderbook
                 if let Some(market_data) = self.app_state.market_data.get_mut(&symbol) {
                     market_data.orderbook = Some(orderbook);
+                    should_redraw = true;
                 }
             }
             MarketEvent::ConnectionStatus { symbol, status } => {
@@ -676,6 +682,7 @@ impl UIManager {
                         MetricsConnectionStatus::Error(err)
                     }
                 };
+                should_redraw = true;
             }
             MarketEvent::DailyCandleUpdate {
                 symbol,
@@ -687,12 +694,13 @@ impl UIManager {
                 let entry = self.app_state.market_data.entry(symbol.clone());
                 let market_data = match entry {
                     Entry::Occupied(occupied) => occupied.into_mut(),
-                    Entry::Vacant(vacant) => {
-                        let mut state = super::MarketDataState::default();
-                        state.symbol = symbol.clone();
-                        vacant.insert(state)
-                    }
+                    Entry::Vacant(vacant) => vacant.insert(super::MarketDataState {
+                        symbol: symbol.clone(),
+                        ..Default::default()
+                    }),
                 };
+
+                let mut appended_closed = false;
 
                 if is_snapshot {
                     market_data.daily_candles = candles;
@@ -710,6 +718,7 @@ impl UIManager {
                         market_data.daily_candles.len(),
                         symbol
                     ));
+                    appended_closed = true; // force redraw on fresh snapshot
                 } else {
                     for candle in candles.drain(..) {
                         if let Some(existing) = market_data
@@ -717,8 +726,14 @@ impl UIManager {
                             .iter_mut()
                             .find(|existing| existing.open_time_ms == candle.open_time_ms)
                         {
+                            if candle.is_closed && !existing.is_closed {
+                                appended_closed = true;
+                            }
                             *existing = candle;
                         } else {
+                            if candle.is_closed {
+                                appended_closed = true;
+                            }
                             market_data.daily_candles.push(candle);
                         }
                     }
@@ -732,6 +747,20 @@ impl UIManager {
                         .daily_candles
                         .sort_by_key(|candle| candle.open_time_ms);
                 }
+
+                market_data.invalidate_kline_cache();
+
+                let now = Instant::now();
+                let refresh_interval =
+                    Duration::from_secs(self.config.ui.kline_refresh_secs.max(1));
+
+                if market_data.update_kline_refresh(
+                    now,
+                    refresh_interval,
+                    is_snapshot || appended_closed,
+                ) {
+                    should_redraw = true;
+                }
             }
             MarketEvent::Error { symbol, error } => {
                 let message = format!("Market error for {}: {}", symbol, error);
@@ -739,10 +768,13 @@ impl UIManager {
                 self.render_state.queue_message(message);
                 self.app_state
                     .push_log(format!("Market error for {}: {}", symbol, error));
+                should_redraw = true;
             }
         }
 
-        self.render_state.should_redraw = true;
+        if should_redraw {
+            self.render_state.should_redraw = true;
+        }
         Ok(())
     }
 
