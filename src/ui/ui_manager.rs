@@ -3,7 +3,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crossterm::event::{self, Event};
@@ -21,7 +21,7 @@ use super::{AppState, PricePoint};
 /// UI Manager for managing the terminal interface
 pub struct UIManager {
     /// Market data manager reference
-    market_manager: Arc<Mutex<MarketDataManager>>,
+    market_manager: Arc<MarketDataManager>,
     /// Event sender for session events (UI -> Session)
     session_event_tx: mpsc::UnboundedSender<SessionEvent>,
     /// Event sender for UI events (Session -> UI)
@@ -84,7 +84,7 @@ impl RenderState {
 impl UIManager {
     /// Create a new UIManager
     pub fn new(
-        market_manager: Arc<Mutex<MarketDataManager>>,
+        market_manager: Arc<MarketDataManager>,
         session_event_tx: mpsc::UnboundedSender<SessionEvent>,
         config: Config,
     ) -> Self {
@@ -113,7 +113,7 @@ impl UIManager {
 
     /// Create a new UIManager with dry-run mode
     pub fn new_with_dry_run(
-        market_manager: Arc<Mutex<MarketDataManager>>,
+        market_manager: Arc<MarketDataManager>,
         session_event_tx: mpsc::UnboundedSender<SessionEvent>,
         config: Config,
     ) -> Self {
@@ -242,8 +242,7 @@ impl UIManager {
         info!("Initializing UI components");
 
         // Load initial symbols from market manager
-        let manager = self.market_manager.lock().await;
-        let symbols = manager.list_subscriptions().await;
+        let symbols = self.market_manager.list_subscriptions().await;
 
         self.app_state.symbols = symbols;
         self.app_state.normalize_selected_tab();
@@ -456,8 +455,7 @@ impl UIManager {
     /// Handle status command
     #[allow(dead_code)]
     async fn handle_status_command(&mut self) -> Result<()> {
-        let manager = self.market_manager.lock().await;
-        let symbols = manager.list_subscriptions().await;
+        let symbols = self.market_manager.list_subscriptions().await;
 
         let status_info = StatusInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -571,6 +569,15 @@ impl UIManager {
                     "Config commands: /config show | /config set <key> <value> | /config reset",
                 );
                 self.app_state.push_log("Displayed config help".to_string());
+            }
+            SessionEvent::HelpInfo { lines } => {
+                if !lines.is_empty() {
+                    self.render_state
+                        .queue_message("Help commands listed in log panel");
+                }
+                for line in lines {
+                    self.app_state.push_log(format!("[help] {}", line));
+                }
             }
             SessionEvent::MetricsUpdate { metrics } => {
                 self.app_state.connection_metrics = metrics;

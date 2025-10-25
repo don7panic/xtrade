@@ -102,7 +102,8 @@ impl MarketDataManager {
 
     /// Subscribe to a symbol with concurrent WebSocket connection
     pub async fn subscribe(&self, symbol: String) -> Result<()> {
-        let mut subscriptions = self.subscriptions.write().await;
+        // Acquire write lock briefly to validate and capture state
+        let subscriptions = self.subscriptions.write().await;
 
         if subscriptions.contains_key(&symbol) {
             debug!("Symbol {} is already subscribed", symbol);
@@ -129,8 +130,11 @@ impl MarketDataManager {
             return Err(anyhow::anyhow!("Invalid symbol format: {}", symbol));
         }
 
+        let should_delay = Self::is_subscribing_too_fast(&subscriptions);
+        drop(subscriptions);
+
         // Performance optimization: Rate limiting - check if we're subscribing too fast
-        if Self::is_subscribing_too_fast(&subscriptions) {
+        if should_delay {
             warn!(
                 "Subscription rate limit reached, delaying subscription for {}",
                 symbol
@@ -142,30 +146,35 @@ impl MarketDataManager {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let event_tx = self.event_tx.clone();
 
-        // Create symbol subscription
+        // Create symbol subscription outside of the lock to avoid blocking other readers
         let mut symbol_subscription =
             SymbolSubscription::new(symbol.clone(), control_rx, event_tx).await?;
 
-        // Initialize the subscription
+        // Initialize the subscription (network calls)
         if let Err(e) = symbol_subscription.initialize().await {
             error!("Failed to initialize subscription for {}: {}", symbol, e);
             return Err(e);
         }
 
+        // Reacquire write lock to register the subscription handle
+        let mut subscriptions = self.subscriptions.write().await;
+
+        if subscriptions.contains_key(&symbol) {
+            warn!(
+                "Subscription for {} was registered while initializing; dropping duplicate",
+                symbol
+            );
+            return Ok(());
+        }
+
         let symbol_clone = symbol.clone();
-
-        // Spawn subscription task with error isolation
         let task = tokio::spawn(async move {
-            // Performance optimization: Set task priority
+            // Yield once to allow scheduler fairness
             tokio::task::yield_now().await;
-
-            // Run the subscription directly without panic handler
             symbol_subscription.run().await;
-
             debug!("Subscription task for {} completed normally", symbol_clone);
         });
 
-        // Store subscription handle
         subscriptions.insert(
             symbol.clone(),
             SubscriptionHandle {
@@ -332,7 +341,7 @@ impl MarketDataManager {
     }
 
     /// Recover subscription state after reconnection
-    pub async fn recover_subscription(&mut self, symbol: &str) -> Result<()> {
+    pub async fn recover_subscription(&self, symbol: &str) -> Result<()> {
         info!("Recovering subscription for symbol: {}", symbol);
 
         // Check if symbol is subscribed
@@ -377,7 +386,7 @@ impl MarketDataManager {
     }
 
     /// Handle reconnection event
-    pub async fn handle_reconnection(&mut self, max_stale_time_ms: u64) -> Result<()> {
+    pub async fn handle_reconnection(&self, max_stale_time_ms: u64) -> Result<()> {
         info!("Handling reconnection event");
 
         let subscriptions = self.subscriptions.read().await;

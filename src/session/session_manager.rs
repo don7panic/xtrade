@@ -83,7 +83,7 @@ pub struct SessionManager {
     /// Session statistics
     stats: SessionStats,
     /// Market data manager
-    market_manager: Arc<Mutex<MarketDataManager>>,
+    market_manager: Arc<MarketDataManager>,
     /// UI task handle (optional)
     ui_task: Option<tokio::task::JoinHandle<()>>,
     /// UI event sender (Session -> UI)
@@ -115,7 +115,7 @@ impl SessionManager {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         // Create market data manager
-        let market_manager = Arc::new(Mutex::new(MarketDataManager::new()));
+        let market_manager = Arc::new(MarketDataManager::new());
 
         // Create command router
         let command_router = CommandRouter::new(market_manager.clone());
@@ -172,6 +172,14 @@ impl SessionManager {
             self.auto_subscribe_symbols().await?;
         }
 
+        if self.config.enable_tui {
+            let help_lines = CommandRouter::help_messages()
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect();
+            self.forward_to_ui(SessionEvent::HelpInfo { lines: help_lines });
+        }
+
         self.state = SessionState::Running;
         info!("Session initialized successfully");
 
@@ -184,8 +192,11 @@ impl SessionManager {
             return self.run_dry_run_mode().await;
         }
 
-        // Display welcome page
-        self.display_welcome_page().await?;
+        if !self.config.enable_tui {
+            self.display_welcome_page().await?;
+        } else {
+            info!("TUI mode enabled, deferring welcome message to UI");
+        }
 
         self.initialize().await?;
 
@@ -258,10 +269,8 @@ impl SessionManager {
     async fn auto_subscribe_symbols(&mut self) -> Result<()> {
         info!("Auto-subscribing to symbols: {:?}", self.app_config.symbols);
 
-        let manager = self.market_manager.lock().await;
-
         for symbol in &self.app_config.symbols {
-            if let Err(e) = manager.subscribe(symbol.clone()).await {
+            if let Err(e) = self.market_manager.subscribe(symbol.clone()).await {
                 error!("Failed to auto-subscribe to {}: {}", symbol, e);
             } else {
                 info!("Auto-subscribed to symbol: {}", symbol);
@@ -287,10 +296,7 @@ impl SessionManager {
 
         // Main event loop
         let mut shutdown_rx = self.shutdown_rx.take().unwrap();
-        let market_event_rx = {
-            let manager = self.market_manager.lock().await;
-            manager.event_receiver()
-        };
+        let market_event_rx = self.market_manager.event_receiver();
 
         while self.state != SessionState::Terminated {
             let market_event_rx = market_event_rx.clone();
@@ -323,10 +329,7 @@ impl SessionManager {
                 } => {
                     match market_event {
                         Some(market_event) => {
-                            {
-                                let manager = self.market_manager.lock().await;
-                                manager.process_market_event(&market_event).await;
-                            }
+                            self.market_manager.process_market_event(&market_event).await;
                             self.handle_market_event(market_event).await?;
                         }
                         None => {
@@ -358,15 +361,14 @@ impl SessionManager {
             InteractiveCommand::Reconnect => self.handle_reconnect().await,
             InteractiveCommand::Quit => self.handle_quit().await,
             InteractiveCommand::Logs => self.handle_logs().await,
+            InteractiveCommand::Help => self.handle_help().await,
         }
     }
 
     /// Handle subscribe command
     async fn handle_subscribe(&mut self, symbols: Vec<String>) -> Result<()> {
-        let manager = self.market_manager.lock().await;
-
         for symbol in symbols {
-            match manager.subscribe(symbol.clone()).await {
+            match self.market_manager.subscribe(symbol.clone()).await {
                 Ok(()) => {
                     info!("Subscribed to symbol: {}", symbol);
                     self.action_channel
@@ -386,10 +388,8 @@ impl SessionManager {
 
     /// Handle unsubscribe command
     async fn handle_unsubscribe(&mut self, symbols: Vec<String>) -> Result<()> {
-        let manager = self.market_manager.lock().await;
-
         for symbol in symbols {
-            match manager.unsubscribe(&symbol).await {
+            match self.market_manager.unsubscribe(&symbol).await {
                 Ok(()) => {
                     info!("Unsubscribed from symbol: {}", symbol);
                     self.action_channel
@@ -411,10 +411,10 @@ impl SessionManager {
     async fn handle_reconnect(&mut self) -> Result<()> {
         let reconnect_window = self.app_config.binance.reconnect_interval_ms;
 
-        let result = {
-            let mut manager = self.market_manager.lock().await;
-            manager.handle_reconnection(reconnect_window).await
-        };
+        let result = self
+            .market_manager
+            .handle_reconnection(reconnect_window)
+            .await;
 
         match result {
             Ok(()) => {
@@ -435,8 +435,7 @@ impl SessionManager {
 
     /// Handle list command
     async fn handle_list(&mut self) -> Result<()> {
-        let manager = self.market_manager.lock().await;
-        let symbols = manager.list_subscriptions().await;
+        let symbols = self.market_manager.list_subscriptions().await;
 
         info!("Current subscriptions: {:?}", symbols);
 
@@ -448,8 +447,7 @@ impl SessionManager {
 
     /// Handle status command
     async fn handle_status(&mut self) -> Result<()> {
-        let manager = self.market_manager.lock().await;
-        let symbols = manager.list_subscriptions().await;
+        let symbols = self.market_manager.list_subscriptions().await;
 
         let status_info = super::action_channel::StatusInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -467,9 +465,7 @@ impl SessionManager {
 
     /// Handle show command
     async fn handle_show(&mut self, symbol: String) -> Result<()> {
-        let manager = self.market_manager.lock().await;
-
-        if let Some(orderbook) = manager.get_orderbook(&symbol).await {
+        if let Some(orderbook) = self.market_manager.get_orderbook(&symbol).await {
             self.action_channel
                 .send_event(SessionEvent::SymbolDetails {
                     symbol,
@@ -594,6 +590,27 @@ impl SessionManager {
 
         self.action_channel
             .send_event(SessionEvent::LogsInfo { info: logs_info })?;
+
+        Ok(())
+    }
+
+    /// Handle help command
+    async fn handle_help(&mut self) -> Result<()> {
+        info!("User requested interactive help");
+
+        if self.config.enable_tui && self.ui_event_tx.is_some() {
+            let lines = CommandRouter::help_messages()
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect();
+            self.forward_to_ui(SessionEvent::HelpInfo { lines });
+        } else {
+            println!();
+            for line in CommandRouter::help_messages() {
+                println!("{}", line);
+            }
+            println!();
+        }
 
         Ok(())
     }
@@ -741,11 +758,10 @@ impl SessionManager {
         }
 
         // Shutdown market data manager
-        let manager = self.market_manager.lock().await;
-        let symbols = manager.list_subscriptions().await;
+        let symbols = self.market_manager.list_subscriptions().await;
 
         for symbol in symbols {
-            if let Err(e) = manager.unsubscribe(&symbol).await {
+            if let Err(e) = self.market_manager.unsubscribe(&symbol).await {
                 error!(
                     "Failed to unsubscribe from {} during shutdown: {}",
                     symbol, e

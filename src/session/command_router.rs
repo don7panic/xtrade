@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::cli::{Cli, Commands};
@@ -32,13 +32,30 @@ pub enum InteractiveCommand {
     Config {
         action: Option<crate::cli::ConfigAction>,
     },
+    /// Show interactive help
+    Help,
 }
+
+/// Static help descriptions used for interactive commands
+const HELP_LINES: [&str; 11] = [
+    "XTrade Interactive Commands:",
+    "  /add <symbol1> [symbol2] ...  - Subscribe to symbols",
+    "  /remove <symbol1> [symbol2] ... - Unsubscribe from symbols",
+    "  /list                         - Show current subscriptions",
+    "  /show  <symbol>               - Show details for symbol",
+    "  /status                       - Show session statistics",
+    "  /reconnect                    - Force reconnection for all subscriptions",
+    "  /logs                         - Show recent logs",
+    "  /config [show|set|reset]      - Configuration management",
+    "  /help                         - Show this help",
+    "  /quit                         - Exit the application",
+];
 
 /// Command router for processing interactive commands
 pub struct CommandRouter {
     /// Market data manager reference
     #[allow(dead_code)]
-    market_manager: Arc<Mutex<MarketDataManager>>,
+    market_manager: Arc<MarketDataManager>,
     /// Command input channel
     command_tx: mpsc::UnboundedSender<InteractiveCommand>,
     /// Command input receiver
@@ -49,7 +66,7 @@ pub struct CommandRouter {
 
 impl CommandRouter {
     /// Create a new CommandRouter
-    pub fn new(market_manager: Arc<Mutex<MarketDataManager>>) -> Self {
+    pub fn new(market_manager: Arc<MarketDataManager>) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
 
         Self {
@@ -186,33 +203,19 @@ impl CommandRouter {
                     ))
                 }
             }
-            "/help" | "?" => {
-                self.show_help();
-                Ok(None)
-            }
+            "/help" | "?" => Ok(Some(InteractiveCommand::Help)),
             "/logs" => Ok(Some(InteractiveCommand::Logs)),
             "/quit" | "/exit" | "/q" => Ok(Some(InteractiveCommand::Quit)),
             _ => Err(anyhow::anyhow!(
-                "Unknown command: {}. Type 'help' for available commands.",
+                "Unknown command: {}. Type '/help' for available commands.",
                 parts[0]
             )),
         }
     }
 
-    /// Show interactive command help
-    fn show_help(&self) {
-        println!("\nXTrade Interactive Commands:");
-        println!("  /add <symbol1> [symbol2] ...  - Subscribe to symbols");
-        println!("  /remove <symbol1> [symbol2] ... - Unsubscribe from symbols");
-        println!("  /list                         - Show current subscriptions");
-        println!("  /show  <symbol>               - Show details for symbol");
-        println!("  /status                       - Show session statistics");
-        println!("  /reconnect                    - Force reconnection for all subscriptions");
-        println!("  /logs                         - Show recent logs");
-        println!("  /config [show|set|reset]      - Configuration management");
-        println!("  /help                         - Show this help");
-        println!("  /quit                         - Exit the application");
-        println!();
+    /// Return interactive command help text
+    pub fn help_messages() -> &'static [&'static str] {
+        &HELP_LINES
     }
 
     /// Get interactive mode status

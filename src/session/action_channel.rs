@@ -36,6 +36,8 @@ pub enum SessionEvent {
     ConfigReset,
     /// Configuration help
     ConfigHelp,
+    /// Interactive command help information
+    HelpInfo { lines: Vec<String> },
     /// Demo started
     DemoStarted,
     /// Demo completed
