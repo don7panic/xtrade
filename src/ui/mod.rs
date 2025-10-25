@@ -27,6 +27,7 @@ pub struct AppState {
     pub connection_metrics: ConnectionMetrics,
     pub paused: bool,
     pub log_messages: VecDeque<String>,
+    pub log_scroll_offset: usize,
     pub notifications: VecDeque<String>,
     pub command_buffer: String,
     pub input_mode: InputMode,
@@ -96,6 +97,7 @@ impl AppState {
             connection_metrics: ConnectionMetrics::default(),
             paused: false,
             log_messages: VecDeque::with_capacity(128),
+            log_scroll_offset: 0,
             notifications: VecDeque::with_capacity(64),
             command_buffer: String::new(),
             input_mode: InputMode::Normal,
@@ -155,6 +157,15 @@ impl AppState {
         while self.log_messages.len() > MAX_LOGS {
             self.log_messages.pop_front();
         }
+        // Clamp scroll offset when new logs arrive to avoid exceeding bounds.
+        if self.log_scroll_offset > 0 {
+            let max_offset = self
+                .log_messages
+                .len()
+                .saturating_sub(1)
+                .min(self.log_scroll_offset);
+            self.log_scroll_offset = max_offset;
+        }
     }
 
     /// Append a notification with bounded history
@@ -169,6 +180,25 @@ impl AppState {
     /// Clear the command buffer
     pub fn clear_command(&mut self) {
         self.command_buffer.clear();
+    }
+
+    /// Scroll logs up (toward older entries)
+    pub fn scroll_logs_up(&mut self) {
+        if self.log_scroll_offset + 1 < self.log_messages.len() {
+            self.log_scroll_offset += 1;
+        }
+    }
+
+    /// Scroll logs down (toward the newest entries)
+    pub fn scroll_logs_down(&mut self) {
+        if self.log_scroll_offset > 0 {
+            self.log_scroll_offset -= 1;
+        }
+    }
+
+    /// Reset log scroll to the newest messages
+    pub fn reset_log_scroll(&mut self) {
+        self.log_scroll_offset = 0;
     }
 }
 

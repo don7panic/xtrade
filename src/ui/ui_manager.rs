@@ -573,7 +573,7 @@ impl UIManager {
             SessionEvent::HelpInfo { lines } => {
                 if !lines.is_empty() {
                     self.render_state
-                        .queue_message("Help commands listed in log panel");
+                        .queue_message("Help commands listed in log panel (use Up/Down to scroll)");
                 }
                 for line in lines {
                     self.app_state.push_log(format!("[help] {}", line));

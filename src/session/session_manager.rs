@@ -170,6 +170,11 @@ impl SessionManager {
         // Auto-subscribe to symbols if configured
         if self.config.auto_subscribe && !self.app_config.symbols.is_empty() {
             self.auto_subscribe_symbols().await?;
+
+            if self.config.enable_tui {
+                let symbols = self.market_manager.list_subscriptions().await;
+                self.forward_to_ui(SessionEvent::SubscriptionList { symbols });
+            }
         }
 
         if self.config.enable_tui {

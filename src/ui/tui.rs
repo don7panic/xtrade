@@ -136,10 +136,13 @@ fn handle_normal_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction 
             UiAction::None
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            // Allow cycling notifications/logs later; no-op for now
+            app.scroll_logs_up();
             UiAction::None
         }
-        KeyCode::Down | KeyCode::Char('j') => UiAction::None,
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.scroll_logs_down();
+            UiAction::None
+        }
         KeyCode::Char('s') => {
             app.input_mode = InputMode::Command;
             app.command_buffer = "/status".to_string();
@@ -213,7 +216,7 @@ fn render_root(
         .constraints([
             Constraint::Length(3),
             Constraint::Min(10),
-            Constraint::Length(7),
+            Constraint::Length(10),
             Constraint::Length(3),
         ])
         .split(frame.size());
@@ -726,31 +729,56 @@ fn render_logs(
     app: &AppState,
     render_state: &crate::ui::ui_manager::RenderState,
 ) {
-    let block = Block::default().title(" Logs ").borders(Borders::ALL);
+    let total_logs = app.log_messages.len();
+    let max_offset = total_logs.saturating_sub(1);
+    let clamped_offset = app.log_scroll_offset.min(max_offset);
+
+    let block = if clamped_offset > 0 {
+        Block::default()
+            .title(format!(" Logs (older +{clamped_offset}) "))
+            .borders(Borders::ALL)
+    } else {
+        Block::default().title(" Logs ").borders(Borders::ALL)
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut items: Vec<ListItem> = app
-        .log_messages
-        .iter()
-        .rev()
-        .take(5)
-        .map(|msg| ListItem::new(Span::raw(msg.clone())))
-        .collect();
+    if inner.height == 0 {
+        return;
+    }
 
-    if let Some(error) = &render_state.error_message {
-        items.insert(
-            0,
-            ListItem::new(Span::styled(error.clone(), Style::default().fg(Color::Red))),
-        );
-    } else if let Some(info) = &render_state.info_message {
-        items.insert(
-            0,
-            ListItem::new(Span::styled(
+    let viewport_height = inner.height as usize;
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut rows_remaining = viewport_height;
+
+    if clamped_offset == 0 {
+        if let Some(error) = &render_state.error_message {
+            items.push(ListItem::new(Span::styled(
+                error.clone(),
+                Style::default().fg(Color::Red),
+            )));
+            rows_remaining = rows_remaining.saturating_sub(1);
+        } else if let Some(info) = &render_state.info_message {
+            items.push(ListItem::new(Span::styled(
                 info.clone(),
                 Style::default().fg(Color::LightBlue),
-            )),
-        );
+            )));
+            rows_remaining = rows_remaining.saturating_sub(1);
+        }
+    }
+
+    if rows_remaining > 0 && total_logs > 0 {
+        let end_index = total_logs.saturating_sub(clamped_offset);
+        let start_index = end_index.saturating_sub(rows_remaining);
+
+        for msg in app
+            .log_messages
+            .iter()
+            .skip(start_index)
+            .take(rows_remaining)
+        {
+            items.push(ListItem::new(Span::raw(msg.clone())));
+        }
     }
 
     if items.is_empty() {
@@ -791,6 +819,8 @@ fn render_command_palette(
             Span::raw(": Next symbol   "),
             Span::styled("Shift+Tab", Style::default().fg(Color::Cyan)),
             Span::raw(": Prev symbol   "),
+            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+            Span::raw(": Scroll logs   "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(": Command mode   "),
             Span::styled("Shift+L", Style::default().fg(Color::Cyan)),
