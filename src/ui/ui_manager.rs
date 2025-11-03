@@ -656,6 +656,32 @@ impl UIManager {
                     should_redraw = true;
                 }
             }
+            MarketEvent::TickerUpdate {
+                symbol,
+                last_price,
+                price_change_percent,
+                high_price,
+                low_price,
+                volume,
+            } => {
+                use std::collections::hash_map::Entry;
+
+                let entry = self.app_state.market_data.entry(symbol.clone());
+                let market_data = match entry {
+                    Entry::Occupied(occupied) => occupied.into_mut(),
+                    Entry::Vacant(vacant) => vacant.insert(super::MarketDataState {
+                        symbol: symbol.clone(),
+                        ..super::MarketDataState::default()
+                    }),
+                };
+
+                market_data.price = last_price;
+                market_data.change_percent = price_change_percent;
+                market_data.volume_24h = volume;
+                market_data.high_24h = high_price;
+                market_data.low_24h = low_price;
+                should_redraw = true;
+            }
             MarketEvent::OrderBookUpdate { symbol, orderbook } => {
                 // Update orderbook
                 if let Some(market_data) = self.app_state.market_data.get_mut(&symbol) {

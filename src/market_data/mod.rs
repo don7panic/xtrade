@@ -43,6 +43,14 @@ pub enum MarketEvent {
         price: f64,
         time: u64,
     },
+    TickerUpdate {
+        symbol: String,
+        last_price: f64,
+        price_change_percent: f64,
+        high_price: f64,
+        low_price: f64,
+        volume: f64,
+    },
     OrderBookUpdate {
         symbol: String,
         orderbook: OrderBook,
@@ -219,10 +227,20 @@ impl MarketDataManager {
                     warn!("Failed to send shutdown signal for {}: {}", symbol, e);
                 }
 
-                // Don't wait for task completion in batch mode for performance
+                let task = handle.task;
+                task.abort();
                 tokio::spawn(async move {
-                    if let Err(e) = handle.task.await {
-                        error!("Subscription task for {} failed: {}", symbol_clone, e);
+                    match task.await {
+                        Ok(_) => debug!("Subscription task for {} terminated", symbol_clone),
+                        Err(e) if e.is_cancelled() => {
+                            debug!(
+                                "Subscription task for {} cancelled during shutdown",
+                                symbol_clone
+                            )
+                        }
+                        Err(e) => {
+                            error!("Subscription task for {} failed: {}", symbol_clone, e);
+                        }
                     }
                 });
 
@@ -315,9 +333,18 @@ impl MarketDataManager {
                 warn!("Failed to send shutdown signal for {}: {}", symbol, e);
             }
 
+            let task = handle.task;
+            task.abort();
+
             // Wait for task to complete
-            if let Err(e) = handle.task.await {
-                error!("Subscription task for {} failed: {}", symbol, e);
+            match task.await {
+                Ok(_) => debug!("Subscription task for {} terminated", symbol),
+                Err(e) if e.is_cancelled() => {
+                    debug!("Subscription task for {} cancelled during shutdown", symbol)
+                }
+                Err(e) => {
+                    error!("Subscription task for {} failed: {}", symbol, e);
+                }
             }
 
             info!("Successfully unsubscribed from symbol: {}", symbol);

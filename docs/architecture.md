@@ -85,7 +85,7 @@
 - **Action Channel**：会话层通过 `tokio::mpsc` 将命令投递到 `MarketDataManager` 或配置管理器。
 - **Market Event Bus**：市场数据引擎向会话层广播 `PriceTick`、`OrderBookUpdate`、`ConnectionEvent` 等结构化事件。
 - **State Update Loop**：会话层消费事件后更新 `State Store`，并触发 UI 局部刷新，确保界面实时响应且避免阻塞后台订阅。
-- **Metrics Pipeline**：后台任务持续产出延迟、速率、错误计数，汇聚到会话状态，在状态栏与 `stats` 面板中展示。
+- **Metrics Pipeline**：后台任务持续产出延迟、速率、错误计数，汇聚到会话状态并在状态栏中展示。
 - **Graceful Shutdown**：`quit/exit` 命令触发停止信号，等待所有后台任务结束、关闭 WebSocket，并持久化最新配置。
 
 ## 六、Binance WebSocket 集成设计
@@ -215,8 +215,6 @@ struct UiConfig {
 - `add <pairs>`：新增订阅；解析多个交易对后向 `MarketDataManager` 发送 `SubscribeAction`。
 - `remove <pairs>`：取消订阅；触发 `UnsubscribeAction` 并清理状态缓存。
 - `pairs`：查询当前订阅状态、最新行情快照、连接健康度。
-- `focus <pair>`：切换主展示面板；更新 `State Store` 中的 `focused_pair`。
-- `stats`：展开性能指标弹窗，展示延迟分布、吞吐率、重连次数。
 - `logs [--tail N]`：读取最近日志缓冲区或写入文件。
 - `config <key> <value>`：动态调整刷新频率、展示模式等配置，必要时触发 UI 重绘。
 - `help` / `?`：输出命令说明与快捷键列表。
@@ -246,7 +244,7 @@ struct UiConfig {
 
 ### 键盘与命令交互
 
-- `Tab` / `Shift+Tab`: 在交易对标签页间切换，并同步更新 `focused_pair`。
+- `Tab`: 在交易对标签页间切换，更新当前选中交易对。
 - `↑` / `↓`: 滚动 OrderBook 或日志面板。
 - `r`: 向后台发送 `ReconnectAction`，强制重连所有订阅。
 - `p`: 切换暂停/恢复渲染节流，用于定位性能问题。

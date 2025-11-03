@@ -6,7 +6,8 @@ use tracing::{debug, error, info, warn};
 
 use super::{ControlMessage, MarketEvent};
 use crate::binance::types::{
-    BinanceMessage, ErrorSeverity, KlineStreamEvent, OrderBook, OrderBookError,
+    BinanceMessage, ErrorSeverity, KlineStreamEvent, OrderBook, OrderBookError, Ticker24hr,
+    WebSocketError,
 };
 use crate::binance::{BinanceRestClient, BinanceWebSocket};
 use crate::market_data::{DEFAULT_DAILY_CANDLE_LIMIT, DailyCandle};
@@ -106,6 +107,15 @@ impl SymbolSubscription {
         if let Err(e) = self.ws.subscribe_trade(&self.symbol).await {
             error!(
                 "Failed to subscribe to trade stream for {}: {}",
+                self.symbol, e
+            );
+            return Err(e);
+        }
+
+        // Subscribe to 24hr ticker stream for 24h stats updates
+        if let Err(e) = self.ws.subscribe_ticker(&self.symbol).await {
+            error!(
+                "Failed to subscribe to ticker stream for {}: {}",
                 self.symbol, e
             );
             return Err(e);
@@ -239,21 +249,41 @@ impl SymbolSubscription {
                             self.process_websocket_message(binance_msg).await;
                         }
                         Err(e) => {
-                            error!("WebSocket error for {}: {}", self.symbol, e);
+                            let is_closed = matches!(&e, WebSocketError::ConnectionError(msg)
+                                if msg.contains("Connection closed"))
+                                || matches!(&e, WebSocketError::MessageError(msg)
+                                    if msg.contains("Connection closed"));
 
-                            // Send error event
-                            if let Err(e) = self.event_tx.send(MarketEvent::Error {
-                                symbol: self.symbol.clone(),
-                                error: e.to_string(),
-                            }) {
-                                error!("Failed to send error event for {}: {}", self.symbol, e);
+                            if is_closed {
+                                warn!("WebSocket connection closed for {}", self.symbol);
+                                let _ = self.event_tx.send(MarketEvent::ConnectionStatus {
+                                    symbol: self.symbol.clone(),
+                                    status: crate::binance::types::ConnectionStatus::Disconnected,
+                                });
+                            } else {
+                                error!("WebSocket error for {}: {}", self.symbol, e);
+                                if let Err(send_err) = self.event_tx.send(MarketEvent::Error {
+                                    symbol: self.symbol.clone(),
+                                    error: e.to_string(),
+                                }) {
+                                    error!(
+                                        "Failed to send error event for {}: {}",
+                                        self.symbol, send_err
+                                    );
+                                }
                             }
 
                             // Automatic reconnection for connection-level errors
                             if Self::requires_reconnection(&e) {
-                                warn!("Connection-level error detected, triggering automatic reconnection for {}", self.symbol);
+                                warn!(
+                                    "Connection-level error detected, triggering automatic reconnection for {}",
+                                    self.symbol
+                                );
                                 if let Err(reconnect_err) = self.reconnect().await {
-                                    error!("Automatic reconnection failed for {}: {}", self.symbol, reconnect_err);
+                                    error!(
+                                        "Automatic reconnection failed for {}: {}",
+                                        self.symbol, reconnect_err
+                                    );
                                 }
                             }
                         }
@@ -311,6 +341,33 @@ impl SymbolSubscription {
                             "Failed to parse price for {}: {}",
                             self.symbol, trade_msg.price
                         );
+                    }
+                }
+            }
+            stream if stream.contains("ticker") => {
+                match serde_json::from_value::<Ticker24hr>(binance_msg.data) {
+                    Ok(ticker) => match Self::parse_ticker_stats(&ticker) {
+                        Ok(stats) => {
+                            if let Err(e) = self.event_tx.send(MarketEvent::TickerUpdate {
+                                symbol: self.symbol.clone(),
+                                last_price: stats.last_price,
+                                price_change_percent: stats.price_change_percent,
+                                high_price: stats.high_price,
+                                low_price: stats.low_price,
+                                volume: stats.volume,
+                            }) {
+                                error!("Failed to send ticker update for {}: {}", self.symbol, e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to convert ticker payload for {}: {}",
+                                self.symbol, e
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to parse ticker event for {}: {}", self.symbol, e);
                     }
                 }
             }
@@ -404,6 +461,19 @@ impl SymbolSubscription {
         }
 
         candle
+    }
+
+    fn parse_ticker_stats(ticker: &Ticker24hr) -> Result<ParsedTickerStats> {
+        Ok(ParsedTickerStats {
+            last_price: Self::parse_f64_str(&ticker.last_price, "last_price")?,
+            price_change_percent: Self::parse_f64_str(
+                &ticker.price_change_percent,
+                "price_change_percent",
+            )?,
+            high_price: Self::parse_f64_str(&ticker.high_price, "high_price")?,
+            low_price: Self::parse_f64_str(&ticker.low_price, "low_price")?,
+            volume: Self::parse_f64_str(&ticker.volume, "volume")?,
+        })
     }
 
     fn parse_f64_str(value: &str, field: &str) -> Result<f64> {
@@ -504,6 +574,14 @@ impl SymbolSubscription {
             return Err(e);
         }
 
+        if let Err(e) = self.ws.start_listening().await {
+            error!(
+                "Failed to restart listener after reconnect for {}: {}",
+                self.symbol, e
+            );
+            return Err(e);
+        }
+
         if let Err(e) = self.resync_orderbook().await {
             error!(
                 "Failed to refresh orderbook after reconnect for {}: {}",
@@ -587,6 +665,14 @@ impl SymbolSubscription {
             WebSocketError::JsonError(_) => false,  // JSON errors don't require reconnection
         }
     }
+}
+
+struct ParsedTickerStats {
+    last_price: f64,
+    price_change_percent: f64,
+    high_price: f64,
+    low_price: f64,
+    volume: f64,
 }
 
 #[cfg(test)]

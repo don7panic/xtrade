@@ -582,14 +582,14 @@ impl SessionManager {
     async fn handle_logs(&mut self) -> Result<()> {
         info!("User requested logs");
 
-        // Get recent logs from tracing system
+        let mut recent_logs = crate::recent_logs(100);
+        if recent_logs.is_empty() {
+            recent_logs.push("(no log entries captured yet)".to_string());
+        }
+
         let logs_info = super::action_channel::LogsInfo {
-            recent_logs: vec![
-                "INFO: Session started".to_string(),
-                "DEBUG: Market data initialized".to_string(),
-                "INFO: Subscribed to BTCUSDT".to_string(),
-            ],
-            log_file_path: "/var/log/xtrade.log".to_string(),
+            recent_logs,
+            log_file_path: self.app_config.log.file_path.clone(),
             log_level: self.cli.effective_log_level(),
         };
 

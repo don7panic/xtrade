@@ -11,7 +11,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::{Mutex, watch};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{self, protocol::Message},
 };
 use tracing::{debug, error, info, warn};
 
@@ -81,10 +82,24 @@ impl BinanceWebSocket {
 
     /// Disconnect from WebSocket
     pub async fn disconnect(&self) -> Result<()> {
+        if let Some(shutdown_tx) = self.shutdown_tx.clone() {
+            let _ = shutdown_tx.send(()).await;
+        }
+
         let mut connection = self.connection.lock().await;
         if let Some(mut ws) = connection.take() {
             if let Err(e) = ws.close(None).await {
-                warn!("Error closing WebSocket connection: {}", e);
+                match e {
+                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
+                        debug!("WebSocket already closed: {}", e);
+                    }
+                    tungstenite::Error::Protocol(
+                        tungstenite::error::ProtocolError::SendAfterClosing,
+                    ) => debug!("WebSocket close handshake already finished"),
+                    other => {
+                        warn!("Error closing WebSocket connection: {}", other);
+                    }
+                }
             }
         }
 
@@ -156,6 +171,13 @@ impl BinanceWebSocket {
     pub async fn subscribe_trade(&self, symbol: &str) -> Result<()> {
         self.subscribe(symbol, "trade").await?;
         info!("Subscribed to trade stream for {}", symbol);
+        Ok(())
+    }
+
+    /// Subscribe to 24hr ticker stream for a symbol
+    pub async fn subscribe_ticker(&self, symbol: &str) -> Result<()> {
+        self.subscribe(symbol, "ticker").await?;
+        info!("Subscribed to ticker stream for {}", symbol);
         Ok(())
     }
 

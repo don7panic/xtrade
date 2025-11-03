@@ -8,7 +8,7 @@
 
 ## 核心交付物（对齐 PRD 验收）
 
-- 会话入口：`xtrade` 启动欢迎页、命令帮助、订阅概览，支持 `add/remove/pairs/focus/stats/logs/config/quit` 等核心命令。
+- 会话入口：`xtrade` 启动欢迎页、命令帮助、订阅概览，支持 `add/remove/pairs/logs/config/quit` 等核心命令。
 - 市场数据引擎：Binance 适配器、OrderBook 快照初始化 + 序列校验的 diff 管线、消息去重与延迟统计。
 - 交互层：基于 `ratatui` 的多交易对面板、OrderBook 表格、Price Trend 日线蜡烛图面板、状态栏、通知区、日志视图。
 - 稳定性与监控：断线重连、心跳检测、metrics（延迟、吞吐、重连次数）、结构化日志、配置热更新能力。
@@ -46,7 +46,7 @@
   - Combined stream 或多连接策略评估并实现，保证 ≥5 个交易对的吞吐与稳定性。
 - **连接可靠性**
   - 指数退避重连、心跳检测、重连后自动 snapshot + resubscribe、失败告警。
-  - `ReconnectAction`、`stats` 命令输出重连次数、最近恢复时间。
+- `ReconnectAction` 输出重连次数、最近恢复时间。
 - **性能指标与延迟统计**
   - 端到端延迟（event_time vs recv_time）直方图与 P50/P95/P99 计算。
   - 消息速率（msg/s）、重连计数、最后消息时间暴露给状态栏与 `stats` 面板。
@@ -75,7 +75,7 @@
 - **验收检查**
   - 触发 `make fmt`, `cargo clippy -- -D warnings`, `make test` 全绿。
   - 手动脚本验证延迟 < 100ms（P95），网络断线 30s 内恢复。
-  - Demo 演练：从启动 → 订阅多个交易对 → 切换面板 → 查看 stats/logs → 优雅退出。
+- Demo 演练：从启动 → 订阅多个交易对 → 切换面板 → 查看日志 → 优雅退出。
 
 **Week 3 实施进展（当前迭代）**
 
