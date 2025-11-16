@@ -613,11 +613,11 @@ impl BinanceWebSocket {
 
     /// Parse stream name into symbol and stream type
     fn parse_stream_name(stream_name: &str) -> Option<(&str, &str)> {
-        let parts: Vec<&str> = stream_name.split('@').collect();
-        if parts.len() == 2 {
-            Some((parts[0], parts[1]))
-        } else {
+        let (symbol, stream) = stream_name.split_once('@')?;
+        if symbol.is_empty() || stream.is_empty() {
             None
+        } else {
+            Some((symbol, stream))
         }
     }
 

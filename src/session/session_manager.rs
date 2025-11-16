@@ -1,9 +1,10 @@
 //! Session Manager for interactive terminal session lifecycle management
 
 use anyhow::Result;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tracing::{debug, error, info, warn};
 
 use crate::cli::Cli;
@@ -69,6 +70,8 @@ impl Default for SessionStats {
         }
     }
 }
+
+const AUTO_SUBSCRIBE_MAX_CONCURRENCY: usize = 4;
 
 /// Main session manager for interactive terminal
 pub struct SessionManager {
@@ -169,12 +172,7 @@ impl SessionManager {
 
         // Auto-subscribe to symbols if configured
         if self.config.auto_subscribe && !self.app_config.symbols.is_empty() {
-            self.auto_subscribe_symbols().await?;
-
-            if self.config.enable_tui {
-                let symbols = self.market_manager.list_subscriptions().await;
-                self.forward_to_ui(SessionEvent::SubscriptionList { symbols });
-            }
+            self.spawn_auto_subscribe_symbols();
         }
 
         if self.config.enable_tui {
@@ -270,19 +268,111 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Auto-subscribe to configured symbols
-    async fn auto_subscribe_symbols(&mut self) -> Result<()> {
-        info!("Auto-subscribing to symbols: {:?}", self.app_config.symbols);
+    /// Spawn background task to auto-subscribe to configured symbols with controlled parallelism
+    fn spawn_auto_subscribe_symbols(&self) {
+        let symbols = self.app_config.symbols.clone();
+        let market_manager = self.market_manager.clone();
+        let action_channel = self.action_channel.clone();
+        let ui_event_tx = self.ui_event_tx.clone();
+        let enable_tui = self.config.enable_tui;
 
-        for symbol in &self.app_config.symbols {
-            if let Err(e) = self.market_manager.subscribe(symbol.clone()).await {
-                error!("Failed to auto-subscribe to {}: {}", symbol, e);
-            } else {
-                info!("Auto-subscribed to symbol: {}", symbol);
-            }
+        if symbols.is_empty() {
+            return;
         }
 
-        Ok(())
+        info!(
+            "Scheduling background auto-subscribe for {} symbols",
+            symbols.len()
+        );
+
+        tokio::spawn(async move {
+            Self::run_auto_subscribe_workflow(
+                symbols,
+                market_manager,
+                action_channel,
+                ui_event_tx,
+                enable_tui,
+            )
+            .await;
+        });
+    }
+
+    async fn run_auto_subscribe_workflow(
+        symbols: Vec<String>,
+        market_manager: Arc<MarketDataManager>,
+        action_channel: ActionChannel,
+        ui_event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
+        enable_tui: bool,
+    ) {
+        let symbol_count = symbols.len();
+        if symbol_count == 0 {
+            return;
+        }
+
+        info!(
+            "Starting background auto-subscribe workflow for {} symbols",
+            symbol_count
+        );
+
+        let max_concurrency = AUTO_SUBSCRIBE_MAX_CONCURRENCY.max(1);
+        let concurrency = max_concurrency.min(symbol_count.max(1));
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+
+        let mut tasks = FuturesUnordered::new();
+
+        for symbol in symbols {
+            let market_manager = market_manager.clone();
+            let action_channel = action_channel.clone();
+            let semaphore = semaphore.clone();
+
+            tasks.push(async move {
+                let permit = match semaphore.acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(e) => {
+                        error!(
+                            "Auto-subscribe permit acquisition failed for {}: {}",
+                            symbol, e
+                        );
+                        return;
+                    }
+                };
+
+                match market_manager.subscribe(symbol.clone()).await {
+                    Ok(()) => {
+                        info!("Auto-subscribed to symbol: {}", symbol);
+                        if let Err(e) = action_channel.send_event(SessionEvent::SubscriptionAdded {
+                            symbol: symbol.clone(),
+                        }) {
+                            error!(
+                                "Failed to emit SubscriptionAdded event for {}: {}",
+                                symbol, e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to auto-subscribe to {}: {}", symbol, e);
+                        let _ = action_channel.send_event(SessionEvent::Error {
+                            message: format!("Failed to auto-subscribe to {}: {}", symbol, e),
+                        });
+                    }
+                }
+
+                drop(permit);
+            });
+        }
+
+        while tasks.next().await.is_some() {}
+
+        info!("Background auto-subscribe workflow completed");
+
+        if enable_tui {
+            if let Some(tx) = ui_event_tx {
+                let symbols = market_manager.list_subscriptions().await;
+                if let Err(e) = tx.send(SessionEvent::SubscriptionList { symbols }) {
+                    error!("Failed to send subscription list to UI: {}", e);
+                }
+            }
+        }
     }
 
     /// Run the main session loop
