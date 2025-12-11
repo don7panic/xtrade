@@ -14,7 +14,8 @@ use crate::metrics::{ConnectionStatus as MetricsConnectionStatus, MetricsCollect
 use crate::ui::ui_manager::UIManager;
 
 use super::action_channel::{ActionChannel, SessionEvent};
-use super::command_router::{CommandRouter, InteractiveCommand};
+use super::alert_manager::{AlertDirection, AlertManager};
+use super::command_router::{AlertAction, ClearTarget, CommandRouter, InteractiveCommand};
 
 /// Session state tracking
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +104,8 @@ pub struct SessionManager {
     command_router: CommandRouter,
     /// Action channel
     action_channel: ActionChannel,
+    /// Price alert manager
+    alert_manager: AlertManager,
     /// Shutdown signal sender
     shutdown_tx: mpsc::Sender<()>,
     /// Shutdown signal receiver
@@ -121,10 +124,13 @@ impl SessionManager {
         let market_manager = Arc::new(MarketDataManager::new());
 
         // Create command router
-        let command_router = CommandRouter::new(market_manager.clone());
+        let command_router = CommandRouter::new();
 
         // Create action channel
         let action_channel = ActionChannel::new();
+
+        // Create alert manager
+        let alert_manager = AlertManager::new();
 
         // Create session config from CLI
         let session_config = SessionConfig {
@@ -151,6 +157,7 @@ impl SessionManager {
             metrics_emit_interval: metrics_interval,
             command_router,
             action_channel,
+            alert_manager,
             shutdown_tx,
             shutdown_rx: Some(shutdown_rx),
         })
@@ -457,6 +464,7 @@ impl SessionManager {
             InteractiveCommand::Quit => self.handle_quit().await,
             InteractiveCommand::Logs => self.handle_logs().await,
             InteractiveCommand::Help => self.handle_help().await,
+            InteractiveCommand::Alert { action } => self.handle_alert(action).await,
         }
     }
 
@@ -740,6 +748,78 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Handle alert command
+    async fn handle_alert(&mut self, action: AlertAction) -> Result<()> {
+        match action {
+            AlertAction::Add {
+                symbol,
+                direction,
+                price,
+            } => match self.alert_manager.add_alert(symbol, direction, price) {
+                Ok(alert) => {
+                    let message = format!(
+                        "Alert #{} added: {} {:?} {}",
+                        alert.id, alert.symbol, alert.direction, alert.threshold
+                    );
+                    self.emit_alert_notification(message);
+                }
+                Err(e) => {
+                    let message = format!("Failed to add alert: {}", e);
+                    self.action_channel
+                        .send_event(SessionEvent::Error { message })?;
+                }
+            },
+            AlertAction::List => {
+                let alerts = self.alert_manager.list_alerts();
+                let mut entries = Vec::new();
+                if alerts.is_empty() {
+                    entries.push("No alerts configured.".to_string());
+                } else {
+                    for alert in alerts {
+                        let status = if alert.triggered {
+                            "triggered"
+                        } else {
+                            "armed"
+                        };
+                        entries.push(format!(
+                            "#{} {} {:?} {} ({})",
+                            alert.id, alert.symbol, alert.direction, alert.threshold, status
+                        ));
+                    }
+                }
+
+                if self.config.enable_tui {
+                    self.forward_to_ui(SessionEvent::AlertList {
+                        entries: entries.clone(),
+                    });
+                } else {
+                    for entry in &entries {
+                        println!("{}", entry);
+                    }
+                }
+            }
+            AlertAction::Clear { target } => match target {
+                ClearTarget::All => {
+                    let removed = self.alert_manager.clear_all();
+                    let message = format!("Cleared {} alerts", removed);
+                    self.emit_alert_notification(message);
+                }
+                ClearTarget::Id(id) => {
+                    if self.alert_manager.clear_alert(id) {
+                        let message = format!("Cleared alert #{}", id);
+                        self.emit_alert_notification(message);
+                    } else {
+                        let message = format!("Alert #{} not found", id);
+                        self.action_channel
+                            .send_event(SessionEvent::Error { message })?;
+                    }
+                }
+            },
+        }
+
+        Ok(())
+    }
+
     /// Forward an event to the UI if the channel is available
     fn forward_to_ui(&self, event: SessionEvent) {
         if let Some(ui_event_tx) = &self.ui_event_tx {
@@ -749,9 +829,34 @@ impl SessionManager {
         }
     }
 
+    /// Emit alert notification to UI/logs or stdout for headless mode
+    fn emit_alert_notification(&self, message: String) {
+        info!("{}", message);
+
+        if self.config.enable_tui {
+            self.forward_to_ui(SessionEvent::AlertNotification {
+                message: message.clone(),
+            });
+        } else {
+            println!("{}", message);
+        }
+    }
+
     /// Handle market event
     async fn handle_market_event(&mut self, event: crate::market_data::MarketEvent) -> Result<()> {
         debug!("Handling market event: {:?}", event);
+
+        if let Some((symbol, price)) = match &event {
+            crate::market_data::MarketEvent::PriceUpdate { symbol, price, .. } => {
+                Some((symbol.clone(), *price))
+            }
+            crate::market_data::MarketEvent::TickerUpdate {
+                symbol, last_price, ..
+            } => Some((symbol.clone(), *last_price)),
+            _ => None,
+        } {
+            self.evaluate_alerts(&symbol, price)?;
+        }
 
         // Forward to UI if available
         if let Some(ui_event_tx) = &self.ui_event_tx {
@@ -804,6 +909,26 @@ impl SessionManager {
                     self.metrics_last_emit = now;
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate alerts for a symbol and emit notifications
+    fn evaluate_alerts(&mut self, symbol: &str, price: f64) -> Result<()> {
+        let normalized = symbol.to_ascii_uppercase();
+        let triggers = self.alert_manager.evaluate_price(&normalized, price);
+
+        for trigger in triggers {
+            let direction_str = match trigger.direction {
+                AlertDirection::Above => "above",
+                AlertDirection::Below => "below",
+            };
+            let message = format!(
+                "Alert #{} triggered: {} {} {} (price {})",
+                trigger.id, trigger.symbol, direction_str, trigger.threshold, trigger.price
+            );
+            self.emit_alert_notification(message);
         }
 
         Ok(())

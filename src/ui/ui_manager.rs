@@ -355,9 +355,17 @@ impl UIManager {
                 Event::Resize(_, _) => {
                     self.render_state.should_redraw = true;
                 }
-                Event::Mouse(_) => {
-                    // Mouse events are ignored for now
-                }
+                Event::Mouse(mouse_event) => match mouse_event.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        self.app_state.scroll_logs_up();
+                        self.render_state.should_redraw = true;
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        self.app_state.scroll_logs_down();
+                        self.render_state.should_redraw = true;
+                    }
+                    _ => {}
+                },
                 Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
             }
         }
@@ -409,8 +417,7 @@ impl UIManager {
         debug!("Processing user command: {}", input);
 
         // Create a temporary command router to parse the command
-        let command_router =
-            crate::session::command_router::CommandRouter::new(self.market_manager.clone());
+        let command_router = crate::session::command_router::CommandRouter::new();
         let command_result = command_router.parse_interactive_command(input);
 
         match command_result {
@@ -589,6 +596,25 @@ impl UIManager {
                 self.render_state.queue_message(message);
                 for log in info.recent_logs.drain(..) {
                     self.app_state.push_log(log);
+                }
+            }
+            SessionEvent::AlertNotification { message } => {
+                self.render_state.queue_message(message.clone());
+                self.app_state.push_log(format!("[alert] {}", message));
+                self.app_state.push_notification(message);
+            }
+            SessionEvent::AlertList { entries } => {
+                if entries.is_empty() {
+                    self.render_state
+                        .queue_message("No alerts configured".to_string());
+                    self.app_state
+                        .push_log("[alert] No alerts configured".to_string());
+                } else {
+                    self.render_state
+                        .queue_message("Alerts listed in log panel".to_string());
+                    for entry in entries {
+                        self.app_state.push_log(format!("[alert] {}", entry));
+                    }
                 }
             }
             SessionEvent::MarketEvent(event) => {

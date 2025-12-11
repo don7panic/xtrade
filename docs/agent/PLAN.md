@@ -81,7 +81,7 @@
 
 - `ratatui` 多面板布局落地，行情/OrderBook/Price Trend 蜡烛图/指标/日志区域实时刷新。
 - Price Trend 面板接入 Binance 日线 kline，支持本地缓存、宽度抽样与 `ui.kline_refresh_secs` 节流（默认 60s）以避免高频抖动。
-- UI 渲染改为事件驱动 + 100ms 节流，加入 Tab/Shift+Tab、Space、Shift+L、`/` 等快捷键。
+- UI 渲染改为事件驱动 + 100ms 节流，加入方向键、Space、Shift+L、`/` 等快捷键。
 - 市场事件与 `MetricsCollector` 打通，定期推送 `ConnectionMetrics` 到 `stats` 面板。
 - `config set refresh_rate_ms`、`config reset` 等指令即时生效，UI 自动调节刷新节奏与深度配置。
 - 日志面板聚合 Session/Market 事件，错误与告警在终端即时可见。

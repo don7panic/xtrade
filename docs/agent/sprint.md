@@ -53,7 +53,7 @@
 - **目标**：实现完整 TUI、交互命令、性能验证、文档与发布。
 - **任务拆分**：
   - **UI 布局**：基于 `ratatui` 实现行情概要、OrderBook、Price Trend 蜡烛图、指标栏、日志/通知面板。
-  - **交互逻辑**：支持 Tab/Shift+Tab 切换交易对、空格暂停渲染、Shift+L 快速打开日志、`/` 进入命令模式，Price Trend 遵循节流刷新策略。
+  - **交互逻辑**：支持方向键切换交易对、空格暂停渲染、Shift+L 快速打开日志、`/` 进入命令模式，Price Trend 遵循节流刷新策略。
   - **数据绑定**：State Store → UI Renderer 事件驱动刷新，100ms 面板节流、`ui.kline_refresh_secs` 控制 Price Trend 更新，脏标记、颜色/主题优化。
   - **观测能力**：`stats` 面板展示延迟/吞吐/重连，`logs` 面板显示结构化日志，`config` 更新实时生效。
   - **系统硬化**：>6h soak test，CPU/内存监控；完成 README、配置示例、TUI 操作指南；准备 `make build` 二进制及可选 Dockerfile。

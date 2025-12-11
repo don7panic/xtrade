@@ -7,7 +7,9 @@ use std::io::{Stdout, stdout};
 use chrono::{DateTime, Utc};
 use crossterm::{
     cursor,
-    event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -43,7 +45,12 @@ impl Tui {
     pub fn new() -> AppResult<Self> {
         enable_raw_mode()?;
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            cursor::Hide,
+            EnableMouseCapture
+        )?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
@@ -78,7 +85,12 @@ impl Drop for Tui {
         // Attempt to restore the terminal; ignore errors because we are in Drop
         let _ = disable_raw_mode();
         let mut stdout = stdout();
-        let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
+        let _ = execute!(
+            stdout,
+            cursor::Show,
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
     }
 }
 
@@ -111,9 +123,14 @@ pub fn handle_key_event(app: &mut AppState, key_event: KeyEvent) -> UiAction {
 
 fn handle_normal_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction {
     match key_event.code {
-        KeyCode::Char('q') | KeyCode::Esc => {
+        KeyCode::Char('q') => {
             app.should_quit = true;
             UiAction::QuitRequested
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.clear_command();
+            UiAction::None
         }
         KeyCode::Char('/') | KeyCode::Char(':') => {
             app.input_mode = InputMode::Command;
@@ -127,19 +144,19 @@ fn handle_normal_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction 
             app.toggle_pause();
             UiAction::None
         }
-        KeyCode::Left | KeyCode::Char('h') => {
+        KeyCode::Left | KeyCode::Up => {
             app.previous_tab();
             UiAction::None
         }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+        KeyCode::Right | KeyCode::Down => {
             app.next_tab();
             UiAction::None
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Char('k') => {
             app.scroll_logs_up();
             UiAction::None
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Char('j') => {
             app.scroll_logs_down();
             UiAction::None
         }
@@ -815,12 +832,12 @@ fn render_command_palette(
         ])]
     } else {
         let mut hints = vec![
-            Span::styled("Tab", Style::default().fg(Color::Cyan)),
-            Span::raw(": Next symbol   "),
-            Span::styled("Shift+Tab", Style::default().fg(Color::Cyan)),
-            Span::raw(": Prev symbol   "),
-            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+            Span::styled("←/→/↑/↓", Style::default().fg(Color::Cyan)),
+            Span::raw(": Switch symbol   "),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(": Scroll logs   "),
+            Span::styled("Scroll", Style::default().fg(Color::Cyan)),
+            Span::raw(": Mouse scroll logs   "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(": Command mode   "),
             Span::styled("Shift+L", Style::default().fg(Color::Cyan)),

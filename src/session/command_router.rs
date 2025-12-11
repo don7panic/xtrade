@@ -1,12 +1,11 @@
 //! Command Router for interactive command processing
 
 use anyhow::Result;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::cli::{Cli, Commands};
-use crate::market_data::MarketDataManager;
+use crate::session::alert_manager::AlertDirection;
 use tracing::warn;
 
 /// Interactive commands for the terminal session
@@ -34,10 +33,33 @@ pub enum InteractiveCommand {
     },
     /// Show interactive help
     Help,
+    /// Manage price alerts
+    Alert { action: AlertAction },
+}
+
+/// Alert subcommands
+#[derive(Debug, Clone)]
+pub enum AlertAction {
+    Add {
+        symbol: String,
+        direction: AlertDirection,
+        price: f64,
+    },
+    List,
+    Clear {
+        target: ClearTarget,
+    },
+}
+
+/// Target for alert clear command
+#[derive(Debug, Clone)]
+pub enum ClearTarget {
+    Id(u64),
+    All,
 }
 
 /// Static help descriptions used for interactive commands
-const HELP_LINES: [&str; 11] = [
+const HELP_LINES: [&str; 14] = [
     "XTrade Interactive Commands:",
     "  /add <symbol1> [symbol2] ...  - Subscribe to symbols",
     "  /remove <symbol1> [symbol2] ... - Unsubscribe from symbols",
@@ -47,15 +69,15 @@ const HELP_LINES: [&str; 11] = [
     "  /reconnect                    - Force reconnection for all subscriptions",
     "  /logs                         - Show recent logs",
     "  /config [show|set|reset]      - Configuration management",
+    "  /alert add <symbol> <above|below> <price> - Add price alert",
+    "  /alert list                   - List configured alerts",
+    "  /alert clear <id|all>         - Clear alerts",
     "  /help                         - Show this help",
     "  /quit                         - Exit the application",
 ];
 
 /// Command router for processing interactive commands
 pub struct CommandRouter {
-    /// Market data manager reference
-    #[allow(dead_code)]
-    market_manager: Arc<MarketDataManager>,
     /// Command input channel
     command_tx: mpsc::UnboundedSender<InteractiveCommand>,
     /// Command input receiver
@@ -64,13 +86,18 @@ pub struct CommandRouter {
     interactive_mode: bool,
 }
 
+impl Default for CommandRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandRouter {
     /// Create a new CommandRouter
-    pub fn new(market_manager: Arc<MarketDataManager>) -> Self {
+    pub fn new() -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
 
         Self {
-            market_manager,
             command_tx,
             command_rx: Some(command_rx),
             interactive_mode: false,
@@ -203,6 +230,7 @@ impl CommandRouter {
                     ))
                 }
             }
+            "/alert" => self.parse_alert_command(&parts),
             "/help" | "?" => Ok(Some(InteractiveCommand::Help)),
             "/logs" => Ok(Some(InteractiveCommand::Logs)),
             "/quit" | "/exit" | "/q" => Ok(Some(InteractiveCommand::Quit)),
@@ -226,5 +254,110 @@ impl CommandRouter {
     /// Get command sender for external use
     pub fn command_sender(&self) -> mpsc::UnboundedSender<InteractiveCommand> {
         self.command_tx.clone()
+    }
+
+    fn parse_alert_command(&self, parts: &[&str]) -> Result<Option<InteractiveCommand>> {
+        if parts.len() < 2 {
+            return Err(anyhow::anyhow!(
+                "Usage: /alert <add|list|clear> [...]. Example: /alert add BTCUSDT above 45000"
+            ));
+        }
+
+        match parts[1] {
+            "add" => {
+                if parts.len() < 5 {
+                    return Err(anyhow::anyhow!(
+                        "Usage: /alert add <symbol> <above|below> <price>"
+                    ));
+                }
+                let symbol = parts[2].to_string();
+                let direction = match parts[3].to_ascii_lowercase().as_str() {
+                    "above" => AlertDirection::Above,
+                    "below" => AlertDirection::Below,
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "Invalid direction '{}'. Use 'above' or 'below'.",
+                            other
+                        ));
+                    }
+                };
+                let price: f64 = parts[4].parse().map_err(|_| {
+                    anyhow::anyhow!("Invalid price '{}'. Price must be a number.", parts[4])
+                })?;
+                Ok(Some(InteractiveCommand::Alert {
+                    action: AlertAction::Add {
+                        symbol,
+                        direction,
+                        price,
+                    },
+                }))
+            }
+            "list" => Ok(Some(InteractiveCommand::Alert {
+                action: AlertAction::List,
+            })),
+            "clear" => {
+                if parts.len() < 3 {
+                    return Err(anyhow::anyhow!(
+                        "Usage: /alert clear <id|all>. Example: /alert clear 1"
+                    ));
+                }
+                let target = if parts[2].eq_ignore_ascii_case("all") {
+                    ClearTarget::All
+                } else {
+                    let id = parts[2].parse::<u64>().map_err(|_| {
+                        anyhow::anyhow!("Invalid alert id '{}'. Expected a number.", parts[2])
+                    })?;
+                    ClearTarget::Id(id)
+                };
+                Ok(Some(InteractiveCommand::Alert {
+                    action: AlertAction::Clear { target },
+                }))
+            }
+            other => Err(anyhow::anyhow!(format!(
+                "Unknown alert action '{}'. Use add, list, or clear.",
+                other
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_alert_add_command() {
+        let router = CommandRouter::new();
+        let cmd = router
+            .parse_interactive_command("/alert add btcusdt above 45000")
+            .unwrap()
+            .unwrap();
+        match cmd {
+            InteractiveCommand::Alert {
+                action:
+                    AlertAction::Add {
+                        symbol,
+                        direction,
+                        price,
+                    },
+            } => {
+                assert_eq!(symbol, "btcusdt");
+                assert_eq!(direction, AlertDirection::Above);
+                assert_eq!(price, 45000.0);
+            }
+            other => panic!("Unexpected command parsed: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_alert_direction() {
+        let router = CommandRouter::new();
+        let err = router
+            .parse_interactive_command("/alert add btcusdt around 45000")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid direction 'around'. Use 'above' or 'below'.")
+        );
     }
 }

@@ -48,6 +48,10 @@ pub enum SessionEvent {
     MetricsUpdate { metrics: ConnectionMetrics },
     /// Market data event
     MarketEvent(MarketEvent),
+    /// Alert notification for UI/CLI
+    AlertNotification { message: String },
+    /// Alert list for UI display
+    AlertList { entries: Vec<String> },
     /// User command from interactive input
     UserCommand { command: InteractiveCommand },
 }

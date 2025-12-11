@@ -452,9 +452,8 @@ When using the Terminal User Interface (`xtrade ui`), the following keyboard sho
 
 ### Navigation
 
-- `Tab` / `Shift+Tab`: Switch between symbol tabs
-- `←` / `→`: Navigate between orderbook sections
-- `↑` / `↓`: Scroll through orderbook levels
+- `←` / `→` / `↑` / `↓`: Switch between symbol tabs
+- `j` / `k`: Scroll through logs
 
 ### Control
 
