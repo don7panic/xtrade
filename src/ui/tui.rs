@@ -20,7 +20,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{
+        Block, Borders, Cell, Gauge, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+    },
 };
 
 use super::{AppState, InputMode, MarketDataState};
@@ -133,11 +135,12 @@ fn handle_normal_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction 
             UiAction::None
         }
         KeyCode::Char('/') | KeyCode::Char(':') => {
-            app.input_mode = InputMode::Command;
-            app.clear_command();
-            if matches!(key_event.code, KeyCode::Char('/')) {
-                app.command_buffer.push('/');
-            }
+            let preset = if matches!(key_event.code, KeyCode::Char('/')) {
+                Some("/")
+            } else {
+                None
+            };
+            app.activate_command_mode(preset);
             UiAction::None
         }
         KeyCode::Char('p') | KeyCode::Char(' ') => {
@@ -161,13 +164,11 @@ fn handle_normal_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction 
             UiAction::None
         }
         KeyCode::Char('s') => {
-            app.input_mode = InputMode::Command;
-            app.command_buffer = "/status".to_string();
+            app.activate_command_mode(Some("/status"));
             UiAction::None
         }
         KeyCode::Char('L') if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.input_mode = InputMode::Command;
-            app.command_buffer = "/logs".to_string();
+            app.activate_command_mode(Some("/logs"));
             UiAction::None
         }
         KeyCode::Enter => UiAction::None,
@@ -180,12 +181,14 @@ fn handle_command_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.clear_command();
+            app.reset_command_suggestions();
             UiAction::None
         }
         KeyCode::Enter => {
             let command = app.command_buffer.trim().to_string();
             app.input_mode = InputMode::Normal;
             app.clear_command();
+            app.reset_command_suggestions();
             if command.is_empty() {
                 UiAction::None
             } else {
@@ -194,16 +197,29 @@ fn handle_command_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction
         }
         KeyCode::Backspace => {
             app.command_buffer.pop();
+            app.update_command_suggestions();
+            UiAction::None
+        }
+        KeyCode::Up => {
+            app.select_previous_suggestion();
+            UiAction::None
+        }
+        KeyCode::Down => {
+            app.select_next_suggestion();
+            UiAction::None
+        }
+        KeyCode::Tab => {
+            app.apply_selected_suggestion();
             UiAction::None
         }
         KeyCode::Char(c) => {
             if !key_event.modifiers.contains(KeyModifiers::CONTROL) {
                 app.command_buffer.push(c);
+                app.update_command_suggestions();
             }
             UiAction::None
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Tab => UiAction::None,
-        KeyCode::Up | KeyCode::Down => UiAction::None,
+        KeyCode::Left | KeyCode::Right => UiAction::None,
         _ => UiAction::None,
     }
 }
@@ -234,7 +250,7 @@ fn render_root(
             Constraint::Length(3),
             Constraint::Min(10),
             Constraint::Length(10),
-            Constraint::Length(3),
+            Constraint::Length(6),
         ])
         .split(frame.size());
 
@@ -824,24 +840,73 @@ fn render_command_palette(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let text = if matches!(app.input_mode, InputMode::Command) {
-        vec![Line::from(vec![
+    if matches!(app.input_mode, InputMode::Command) {
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(inner);
+
+        let input_line = Paragraph::new(Text::from(vec![Line::from(vec![
             Span::styled(">", Style::default().fg(Color::Cyan)),
             Span::raw(" "),
             Span::raw(app.command_buffer.clone()),
-        ])]
+        ])]))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(input_line, layout[0]);
+
+        let suggestion_items: Vec<ListItem> = if app.filtered_commands.is_empty() {
+            vec![ListItem::new(Span::styled(
+                "No matching commands",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            app.filtered_commands
+                .iter()
+                .map(|cmd| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            cmd.trigger,
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(cmd.usage, Style::default().fg(Color::Gray)),
+                        Span::raw("  "),
+                        Span::raw(cmd.description),
+                    ]))
+                })
+                .collect()
+        };
+
+        let mut state = ListState::default();
+        if !app.filtered_commands.is_empty() {
+            state.select(Some(
+                app.selected_command_index
+                    .min(app.filtered_commands.len().saturating_sub(1)),
+            ));
+        }
+
+        let list = List::new(suggestion_items)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+
+        frame.render_stateful_widget(list, layout[1], &mut state);
     } else {
         let mut hints = vec![
             Span::styled("←/→/↑/↓", Style::default().fg(Color::Cyan)),
             Span::raw(": Switch symbol   "),
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(": Scroll logs   "),
-            Span::styled("Scroll", Style::default().fg(Color::Cyan)),
-            Span::raw(": Mouse scroll logs   "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
-            Span::raw(": Command mode   "),
-            Span::styled("Shift+L", Style::default().fg(Color::Cyan)),
-            Span::raw(": Logs command   "),
+            Span::raw(": Command palette   "),
+            Span::styled("Tab", Style::default().fg(Color::Cyan)),
+            Span::raw(": Autocomplete   "),
             Span::styled("Space", Style::default().fg(Color::Cyan)),
             Span::raw(": Pause   "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
@@ -856,9 +921,8 @@ fn render_command_palette(
             ));
         }
 
-        vec![Line::from(hints)]
-    };
-
-    let paragraph = Paragraph::new(Text::from(text)).wrap(Wrap { trim: true });
-    frame.render_widget(paragraph, inner);
+        let paragraph =
+            Paragraph::new(Text::from(vec![Line::from(hints)])).wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, inner);
+    }
 }

@@ -14,6 +14,7 @@ pub mod ui_manager;
 use crate::binance::types::OrderBook;
 use crate::market_data::DailyCandle;
 use crate::metrics::ConnectionMetrics;
+use crate::session::command_router::{CommandInfo, CommandRouter};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,9 @@ pub struct AppState {
     pub notifications: VecDeque<String>,
     pub command_buffer: String,
     pub input_mode: InputMode,
+    pub available_commands: Vec<CommandInfo>,
+    pub filtered_commands: Vec<CommandInfo>,
+    pub selected_command_index: usize,
 }
 
 /// Market data state for a single symbol
@@ -101,6 +105,9 @@ impl AppState {
             notifications: VecDeque::with_capacity(64),
             command_buffer: String::new(),
             input_mode: InputMode::Normal,
+            available_commands: CommandRouter::commands().to_vec(),
+            filtered_commands: CommandRouter::commands().to_vec(),
+            selected_command_index: 0,
         }
     }
 
@@ -180,6 +187,85 @@ impl AppState {
     /// Clear the command buffer
     pub fn clear_command(&mut self) {
         self.command_buffer.clear();
+    }
+
+    /// Enter command mode with optional preset buffer
+    pub fn activate_command_mode(&mut self, preset: Option<&str>) {
+        self.input_mode = InputMode::Command;
+        self.clear_command();
+        if let Some(preset_value) = preset {
+            self.command_buffer.push_str(preset_value);
+        }
+        self.reset_command_suggestions();
+        self.update_command_suggestions();
+    }
+
+    /// Reset command suggestions to the full list
+    pub fn reset_command_suggestions(&mut self) {
+        self.filtered_commands = self.available_commands.clone();
+        self.selected_command_index = 0;
+    }
+
+    /// Update command suggestions based on the current buffer
+    pub fn update_command_suggestions(&mut self) {
+        let raw_query = self.command_buffer.trim();
+        if raw_query.is_empty() || raw_query == "/" {
+            self.reset_command_suggestions();
+            return;
+        }
+
+        let query = raw_query.trim_start_matches('/').to_ascii_lowercase();
+        self.filtered_commands = self
+            .available_commands
+            .iter()
+            .copied()
+            .filter(|cmd| {
+                cmd.trigger.to_ascii_lowercase().contains(&query)
+                    || cmd.usage.to_ascii_lowercase().contains(&query)
+                    || cmd.description.to_ascii_lowercase().contains(&query)
+            })
+            .collect();
+
+        if self.filtered_commands.is_empty() {
+            self.selected_command_index = 0;
+        } else if self.selected_command_index >= self.filtered_commands.len() {
+            self.selected_command_index = self.filtered_commands.len() - 1;
+        }
+    }
+
+    /// Select next command suggestion
+    pub fn select_next_suggestion(&mut self) {
+        if self.filtered_commands.is_empty() {
+            return;
+        }
+        let last = self.filtered_commands.len().saturating_sub(1);
+        if self.selected_command_index < last {
+            self.selected_command_index += 1;
+        }
+    }
+
+    /// Select previous command suggestion
+    pub fn select_previous_suggestion(&mut self) {
+        if self.filtered_commands.is_empty() {
+            return;
+        }
+        if self.selected_command_index > 0 {
+            self.selected_command_index -= 1;
+        }
+    }
+
+    /// Apply the selected suggestion to the command buffer
+    pub fn apply_selected_suggestion(&mut self) {
+        if let Some(cmd) = self.selected_command() {
+            self.command_buffer = cmd.usage.to_string();
+            self.reset_command_suggestions();
+            self.update_command_suggestions();
+        }
+    }
+
+    /// Get the currently selected suggestion, if any
+    pub fn selected_command(&self) -> Option<&CommandInfo> {
+        self.filtered_commands.get(self.selected_command_index)
     }
 
     /// Scroll logs up (toward older entries)

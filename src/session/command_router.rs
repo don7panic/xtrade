@@ -58,6 +58,14 @@ pub enum ClearTarget {
     All,
 }
 
+/// Metadata describing an interactive command (used for UI hints)
+#[derive(Debug, Clone, Copy)]
+pub struct CommandInfo {
+    pub trigger: &'static str,
+    pub usage: &'static str,
+    pub description: &'static str,
+}
+
 /// Static help descriptions used for interactive commands
 const HELP_LINES: [&str; 14] = [
     "XTrade Interactive Commands:",
@@ -74,6 +82,65 @@ const HELP_LINES: [&str; 14] = [
     "  /alert clear <id|all>         - Clear alerts",
     "  /help                         - Show this help",
     "  /quit                         - Exit the application",
+];
+
+/// Static list of interactive commands with descriptions for UI surfaces
+const COMMANDS: [CommandInfo; 11] = [
+    CommandInfo {
+        trigger: "/add",
+        usage: "/add <symbol1> [symbol2] ...",
+        description: "Subscribe to symbols",
+    },
+    CommandInfo {
+        trigger: "/remove",
+        usage: "/remove <symbol1> [symbol2] ...",
+        description: "Unsubscribe from symbols",
+    },
+    CommandInfo {
+        trigger: "/list",
+        usage: "/list",
+        description: "Show current subscriptions",
+    },
+    CommandInfo {
+        trigger: "/show",
+        usage: "/show <symbol>",
+        description: "Show details for symbol",
+    },
+    CommandInfo {
+        trigger: "/status",
+        usage: "/status",
+        description: "Show session statistics",
+    },
+    CommandInfo {
+        trigger: "/reconnect",
+        usage: "/reconnect",
+        description: "Force reconnection for all subscriptions",
+    },
+    CommandInfo {
+        trigger: "/logs",
+        usage: "/logs",
+        description: "Show recent logs",
+    },
+    CommandInfo {
+        trigger: "/config",
+        usage: "/config [show|set <key> <value>|reset]",
+        description: "Configuration management",
+    },
+    CommandInfo {
+        trigger: "/alert",
+        usage: "/alert add <symbol> <above|below> <price> | /alert list | /alert clear <id|all>",
+        description: "Manage price alerts",
+    },
+    CommandInfo {
+        trigger: "/help",
+        usage: "/help",
+        description: "Show help",
+    },
+    CommandInfo {
+        trigger: "/quit",
+        usage: "/quit",
+        description: "Exit the application",
+    },
 ];
 
 /// Command router for processing interactive commands
@@ -254,6 +321,11 @@ impl CommandRouter {
     /// Get command sender for external use
     pub fn command_sender(&self) -> mpsc::UnboundedSender<InteractiveCommand> {
         self.command_tx.clone()
+    }
+
+    /// Return the catalog of interactive commands for UI surfaces
+    pub fn commands() -> &'static [CommandInfo] {
+        &COMMANDS
     }
 
     fn parse_alert_command(&self, parts: &[&str]) -> Result<Option<InteractiveCommand>> {
