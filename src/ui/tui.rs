@@ -21,7 +21,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Cell, Gauge, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+        Block, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
     },
 };
 
@@ -102,6 +102,22 @@ pub fn handle_key_event(app: &mut AppState, key_event: KeyEvent) -> UiAction {
         return UiAction::None;
     }
 
+    // Global shortcut to bring up alert popup when in normal mode
+    if matches!(app.input_mode, InputMode::Normal) {
+        if let KeyCode::Char('a') = key_event.code {
+            if !key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                let preset = app
+                    .current_symbol()
+                    .and_then(|sym| app.market_data.get(sym))
+                    .map(|md| md.price);
+                if let Err(e) = app.activate_alert_popup(preset) {
+                    app.push_notification(e);
+                }
+                return UiAction::None;
+            }
+        }
+    }
+
     // Global shortcuts first
     if key_event.modifiers.contains(KeyModifiers::CONTROL) {
         match key_event.code {
@@ -120,6 +136,7 @@ pub fn handle_key_event(app: &mut AppState, key_event: KeyEvent) -> UiAction {
     match app.input_mode {
         InputMode::Normal => handle_normal_mode_keys(app, key_event),
         InputMode::Command => handle_command_mode_keys(app, key_event),
+        InputMode::AlertPopup => handle_alert_popup_keys(app, key_event),
     }
 }
 
@@ -220,6 +237,60 @@ fn handle_command_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction
             UiAction::None
         }
         KeyCode::Left | KeyCode::Right => UiAction::None,
+        _ => UiAction::None,
+    }
+}
+
+fn handle_alert_popup_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction {
+    match key_event.code {
+        KeyCode::Esc => {
+            app.deactivate_alert_popup();
+            UiAction::None
+        }
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+            app.toggle_alert_direction();
+            UiAction::None
+        }
+        KeyCode::Enter => match app.alert_price() {
+            Ok(price) => {
+                let command = format!(
+                    "/alert {} {} {}",
+                    app.alert_form.symbol,
+                    if app.alert_form.direction_above {
+                        "above"
+                    } else {
+                        "below"
+                    },
+                    price
+                );
+                app.deactivate_alert_popup();
+                UiAction::SubmitCommand(command)
+            }
+            Err(e) => {
+                app.alert_form.error = Some(e);
+                UiAction::None
+            }
+        },
+        KeyCode::Backspace => {
+            if !app.alert_form.price_dirty {
+                app.alert_form.price_input.clear();
+                app.alert_form.price_dirty = true;
+            }
+            app.alert_form.price_input.pop();
+            app.alert_form.error = None;
+            UiAction::None
+        }
+        KeyCode::Char(c) => {
+            if c.is_ascii_digit() || c == '.' || c == '-' || c == '+' {
+                if !app.alert_form.price_dirty {
+                    app.alert_form.price_input.clear();
+                    app.alert_form.price_dirty = true;
+                }
+                app.alert_form.price_input.push(c);
+                app.alert_form.error = None;
+            }
+            UiAction::None
+        }
         _ => UiAction::None,
     }
 }
@@ -825,15 +896,151 @@ fn render_logs(
     frame.render_widget(list, inner);
 }
 
+fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppState) {
+    // Centered box occupying a portion of the screen
+    let popup_area = centered_rect(50, 20, frame.size());
+    let block = Block::default()
+        .title(" Add Alert ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Magenta));
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(block.clone(), popup_area);
+
+    let inner_area = block.inner(popup_area);
+    let inner_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .margin(1)
+        .split(inner_area);
+
+    // Symbol row
+    let symbol_text = format!("Symbol: {}", app.alert_form.symbol);
+    frame.render_widget(
+        Paragraph::new(symbol_text)
+            .style(Style::default().fg(Color::Cyan))
+            .wrap(Wrap { trim: true }),
+        inner_layout[0],
+    );
+
+    // Direction row
+    let (above_style, below_style) = if app.alert_form.direction_above {
+        (
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Gray),
+        )
+    } else {
+        (
+            Style::default().fg(Color::Gray),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let dir_line = Line::from(vec![
+        Span::raw("Direction: "),
+        Span::styled("Above", above_style),
+        Span::raw("  "),
+        Span::styled("Below", below_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(dir_line).wrap(Wrap { trim: true }),
+        inner_layout[1],
+    );
+
+    // Price row
+    let price_value = if app.alert_form.price_input.is_empty() {
+        " ".to_string()
+    } else {
+        app.alert_form.price_input.clone()
+    };
+    let price_line = Line::from(vec![
+        Span::styled("Price: ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            price_value,
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::White),
+        ),
+        // Cursor indicator
+        Span::styled(" ", Style::default().bg(Color::LightCyan)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(price_line).wrap(Wrap { trim: true }),
+        inner_layout[2],
+    );
+
+    // Error/info row
+    let (error_line, error_style) = if let Some(err) = app.alert_form.error.clone() {
+        (err, Style::default().fg(Color::LightRed))
+    } else {
+        (
+            "Enter price, Tab to toggle Above/Below, Enter to save, Esc to cancel".to_string(),
+            Style::default().fg(Color::Gray),
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(error_line).style(error_style),
+        inner_layout[3],
+    );
+
+    // Hint row
+    frame.render_widget(
+        Paragraph::new("Shortcuts: a = open, Tab/←/→ toggle direction, Enter = save, Esc = cancel")
+            .style(Style::default().fg(Color::Gray)),
+        inner_layout[4],
+    );
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    let vertical_chunk = popup_layout[1];
+
+    let horizontal_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical_chunk);
+
+    horizontal_layout[1]
+}
+
 fn render_command_palette(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &AppState,
     render_state: &crate::ui::ui_manager::RenderState,
 ) {
+    if matches!(app.input_mode, InputMode::AlertPopup) {
+        render_alert_popup(frame, area, app);
+        return;
+    }
+
     let title = match app.input_mode {
         InputMode::Normal => " Command Hints ",
         InputMode::Command => " Command Entry ",
+        InputMode::AlertPopup => " Command Hints ",
     };
 
     let block = Block::default().title(title).borders(Borders::ALL);
@@ -903,10 +1110,10 @@ fn render_command_palette(
             Span::raw(": Switch symbol   "),
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(": Scroll logs   "),
+            Span::styled("a", Style::default().fg(Color::Cyan)),
+            Span::raw(": Alert popup   "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(": Command palette   "),
-            Span::styled("Tab", Style::default().fg(Color::Cyan)),
-            Span::raw(": Autocomplete   "),
             Span::styled("Space", Style::default().fg(Color::Cyan)),
             Span::raw(": Pause   "),
             Span::styled("q", Style::default().fg(Color::Cyan)),

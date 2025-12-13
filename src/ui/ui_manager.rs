@@ -418,7 +418,9 @@ impl UIManager {
 
         // Create a temporary command router to parse the command
         let command_router = crate::session::command_router::CommandRouter::new();
-        let command_result = command_router.parse_interactive_command(input);
+        let default_symbol = self.app_state.current_symbol().map(|s| s.as_str());
+        let command_result =
+            command_router.parse_interactive_command_with_default(input, default_symbol);
 
         match command_result {
             Ok(Some(command)) => {

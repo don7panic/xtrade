@@ -35,6 +35,7 @@ pub struct AppState {
     pub available_commands: Vec<CommandInfo>,
     pub filtered_commands: Vec<CommandInfo>,
     pub selected_command_index: usize,
+    pub alert_form: AlertFormState,
 }
 
 /// Market data state for a single symbol
@@ -88,6 +89,17 @@ pub enum InputMode {
     #[default]
     Normal,
     Command,
+    AlertPopup,
+}
+
+/// Simple alert form state for popup interaction
+#[derive(Debug, Clone, Default)]
+pub struct AlertFormState {
+    pub symbol: String,
+    pub direction_above: bool,
+    pub price_input: String,
+    pub error: Option<String>,
+    pub price_dirty: bool,
 }
 
 impl AppState {
@@ -108,6 +120,7 @@ impl AppState {
             available_commands: CommandRouter::commands().to_vec(),
             filtered_commands: CommandRouter::commands().to_vec(),
             selected_command_index: 0,
+            alert_form: AlertFormState::default(),
         }
     }
 
@@ -198,6 +211,48 @@ impl AppState {
         }
         self.reset_command_suggestions();
         self.update_command_suggestions();
+    }
+
+    /// Enter alert popup mode using the current symbol and optional preset price
+    pub fn activate_alert_popup(&mut self, preset_price: Option<f64>) -> Result<(), String> {
+        let symbol = self
+            .current_symbol()
+            .cloned()
+            .ok_or_else(|| "Select a symbol first".to_string())?;
+
+        let price_string = preset_price
+            .map(|p| format!("{:.2}", p))
+            .unwrap_or_default();
+
+        self.alert_form = AlertFormState {
+            symbol,
+            direction_above: true,
+            price_input: price_string,
+            error: None,
+            price_dirty: false,
+        };
+        self.input_mode = InputMode::AlertPopup;
+        Ok(())
+    }
+
+    /// Exit alert popup mode and clear state
+    pub fn deactivate_alert_popup(&mut self) {
+        self.alert_form = AlertFormState::default();
+        self.input_mode = InputMode::Normal;
+    }
+
+    /// Cycle alert direction
+    pub fn toggle_alert_direction(&mut self) {
+        self.alert_form.direction_above = !self.alert_form.direction_above;
+    }
+
+    /// Attempt to parse the alert price from input
+    pub fn alert_price(&self) -> Result<f64, String> {
+        self.alert_form
+            .price_input
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| "Price must be a number".to_string())
     }
 
     /// Reset command suggestions to the full list

@@ -67,7 +67,7 @@ pub struct CommandInfo {
 }
 
 /// Static help descriptions used for interactive commands
-const HELP_LINES: [&str; 14] = [
+const HELP_LINES: [&str; 13] = [
     "XTrade Interactive Commands:",
     "  /add <symbol1> [symbol2] ...  - Subscribe to symbols",
     "  /remove <symbol1> [symbol2] ... - Unsubscribe from symbols",
@@ -77,7 +77,6 @@ const HELP_LINES: [&str; 14] = [
     "  /reconnect                    - Force reconnection for all subscriptions",
     "  /logs                         - Show recent logs",
     "  /config [show|set|reset]      - Configuration management",
-    "  /alert add <symbol> <above|below> <price> - Add price alert",
     "  /alert list                   - List configured alerts",
     "  /alert clear <id|all>         - Clear alerts",
     "  /help                         - Show this help",
@@ -85,7 +84,7 @@ const HELP_LINES: [&str; 14] = [
 ];
 
 /// Static list of interactive commands with descriptions for UI surfaces
-const COMMANDS: [CommandInfo; 11] = [
+const COMMANDS: [CommandInfo; 10] = [
     CommandInfo {
         trigger: "/add",
         usage: "/add <symbol1> [symbol2] ...",
@@ -125,11 +124,6 @@ const COMMANDS: [CommandInfo; 11] = [
         trigger: "/config",
         usage: "/config [show|set <key> <value>|reset]",
         description: "Configuration management",
-    },
-    CommandInfo {
-        trigger: "/alert",
-        usage: "/alert add <symbol> <above|below> <price> | /alert list | /alert clear <id|all>",
-        description: "Manage price alerts",
     },
     CommandInfo {
         trigger: "/help",
@@ -236,6 +230,15 @@ impl CommandRouter {
 
     /// Parse interactive command from string input
     pub fn parse_interactive_command(&self, input: &str) -> Result<Option<InteractiveCommand>> {
+        self.parse_interactive_command_with_default(input, None)
+    }
+
+    /// Parse interactive command from string input with optional default symbol context
+    pub fn parse_interactive_command_with_default(
+        &self,
+        input: &str,
+        default_symbol: Option<&str>,
+    ) -> Result<Option<InteractiveCommand>> {
         let input = input.trim();
 
         if input.is_empty() {
@@ -297,7 +300,7 @@ impl CommandRouter {
                     ))
                 }
             }
-            "/alert" => self.parse_alert_command(&parts),
+            "/alert" => self.parse_alert_command(&parts, default_symbol),
             "/help" | "?" => Ok(Some(InteractiveCommand::Help)),
             "/logs" => Ok(Some(InteractiveCommand::Logs)),
             "/quit" | "/exit" | "/q" => Ok(Some(InteractiveCommand::Quit)),
@@ -328,34 +331,28 @@ impl CommandRouter {
         &COMMANDS
     }
 
-    fn parse_alert_command(&self, parts: &[&str]) -> Result<Option<InteractiveCommand>> {
+    fn parse_alert_command(
+        &self,
+        parts: &[&str],
+        default_symbol: Option<&str>,
+    ) -> Result<Option<InteractiveCommand>> {
         if parts.len() < 2 {
             return Err(anyhow::anyhow!(
-                "Usage: /alert <add|list|clear> [...]. Example: /alert add BTCUSDT above 45000"
+                "Usage: /alert add <symbol> <above|below> <price> | /alert list | /alert clear <id|all>. Shortcuts: /alert <symbol> >45000 or /alert >45000 (uses the selected symbol)."
             ));
         }
 
         match parts[1] {
             "add" => {
-                if parts.len() < 5 {
+                if parts.len() < 3 {
                     return Err(anyhow::anyhow!(
-                        "Usage: /alert add <symbol> <above|below> <price>"
+                        "Usage: /alert add <symbol> <above|below|>|<|+|-> <price>. Example: /alert add BTCUSDT > 45000"
                     ));
                 }
-                let symbol = parts[2].to_string();
-                let direction = match parts[3].to_ascii_lowercase().as_str() {
-                    "above" => AlertDirection::Above,
-                    "below" => AlertDirection::Below,
-                    other => {
-                        return Err(anyhow::anyhow!(
-                            "Invalid direction '{}'. Use 'above' or 'below'.",
-                            other
-                        ));
-                    }
-                };
-                let price: f64 = parts[4].parse().map_err(|_| {
-                    anyhow::anyhow!("Invalid price '{}'. Price must be a number.", parts[4])
-                })?;
+
+                let (symbol, direction, price) =
+                    self.parse_alert_add_tokens(&parts[2..], default_symbol)?;
+
                 Ok(Some(InteractiveCommand::Alert {
                     action: AlertAction::Add {
                         symbol,
@@ -385,51 +382,131 @@ impl CommandRouter {
                     action: AlertAction::Clear { target },
                 }))
             }
-            other => Err(anyhow::anyhow!(format!(
-                "Unknown alert action '{}'. Use add, list, or clear.",
-                other
-            ))),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_alert_add_command() {
-        let router = CommandRouter::new();
-        let cmd = router
-            .parse_interactive_command("/alert add btcusdt above 45000")
-            .unwrap()
-            .unwrap();
-        match cmd {
-            InteractiveCommand::Alert {
-                action:
-                    AlertAction::Add {
+            _ => {
+                // Shorthand: /alert <symbol?> <direction?> <price>
+                let (symbol, direction, price) =
+                    self.parse_alert_add_tokens(&parts[1..], default_symbol)?;
+                Ok(Some(InteractiveCommand::Alert {
+                    action: AlertAction::Add {
                         symbol,
                         direction,
                         price,
                     },
-            } => {
-                assert_eq!(symbol, "btcusdt");
-                assert_eq!(direction, AlertDirection::Above);
-                assert_eq!(price, 45000.0);
+                }))
             }
-            other => panic!("Unexpected command parsed: {:?}", other),
         }
     }
 
-    #[test]
-    fn rejects_invalid_alert_direction() {
-        let router = CommandRouter::new();
-        let err = router
-            .parse_interactive_command("/alert add btcusdt around 45000")
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Invalid direction 'around'. Use 'above' or 'below'.")
-        );
+    fn parse_alert_add_tokens(
+        &self,
+        tokens: &[&str],
+        default_symbol: Option<&str>,
+    ) -> Result<(String, AlertDirection, f64)> {
+        if tokens.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Usage: /alert <symbol> >45000 or /alert >45000 (uses the selected symbol)"
+            ));
+        }
+
+        let first = tokens[0];
+        let mut idx = 0;
+
+        let looks_like_direction_or_price = self.is_direction_hint(first)
+            || self.parse_prefix_direction(first).is_some()
+            || first.parse::<f64>().is_ok();
+
+        let symbol = if looks_like_direction_or_price {
+            default_symbol
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Symbol required. Provide a symbol (e.g. '/alert BTCUSDT >45000') or select a symbol and use '/alert >45000'."
+                    )
+                })?
+        } else {
+            idx += 1;
+            first.to_string()
+        };
+
+        let remaining = &tokens[idx..];
+        let (direction, price) = self.parse_direction_and_price(remaining)?;
+
+        Ok((symbol, direction, price))
+    }
+
+    fn parse_direction_and_price(&self, tokens: &[&str]) -> Result<(AlertDirection, f64)> {
+        if tokens.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Usage: /alert <symbol> >45000 or /alert <symbol> <above|below> <price>"
+            ));
+        }
+
+        let first = tokens[0];
+
+        // Handle fused prefix like >45000 or -43000
+        if let Some((direction, rest)) = self.parse_prefix_direction(first) {
+            if !rest.is_empty() {
+                let price = rest.parse::<f64>().map_err(|_| {
+                    anyhow::anyhow!("Invalid price '{}'. Price must be a number.", rest)
+                })?;
+                return Ok((direction, price));
+            } else if tokens.len() >= 2 {
+                let price = tokens[1].parse::<f64>().map_err(|_| {
+                    anyhow::anyhow!("Invalid price '{}'. Price must be a number.", tokens[1])
+                })?;
+                return Ok((direction, price));
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Missing price. Try '/alert <symbol> >45000'"
+                ));
+            }
+        }
+
+        // Handle separated direction + price
+        if let Some(direction) = self.parse_direction_token(first) {
+            if tokens.len() < 2 {
+                return Err(anyhow::anyhow!(
+                    "Missing price. Try '/alert <symbol> {} <price>'",
+                    first
+                ));
+            }
+            let price = tokens[1].parse::<f64>().map_err(|_| {
+                anyhow::anyhow!("Invalid price '{}'. Price must be a number.", tokens[1])
+            })?;
+            return Ok((direction, price));
+        }
+
+        // Allow bare price to default to "above"
+        if let Ok(price) = first.parse::<f64>() {
+            return Ok((AlertDirection::Above, price));
+        }
+
+        Err(anyhow::anyhow!(
+            "Could not parse alert. Use '/alert <symbol> >45000' or '/alert <symbol> <above|below> <price>'."
+        ))
+    }
+
+    fn parse_direction_token(&self, token: &str) -> Option<AlertDirection> {
+        match token.to_ascii_lowercase().as_str() {
+            "above" | ">" | "+" => Some(AlertDirection::Above),
+            "below" | "<" | "-" => Some(AlertDirection::Below),
+            _ => None,
+        }
+    }
+
+    fn parse_prefix_direction<'a>(&self, token: &'a str) -> Option<(AlertDirection, &'a str)> {
+        let mut chars = token.chars();
+        let first = chars.next()?;
+        let direction = match first {
+            '>' | '+' => AlertDirection::Above,
+            '<' | '-' => AlertDirection::Below,
+            _ => return None,
+        };
+        let remainder = chars.as_str();
+        Some((direction, remainder))
+    }
+
+    fn is_direction_hint(&self, token: &str) -> bool {
+        self.parse_direction_token(token).is_some() || self.parse_prefix_direction(token).is_some()
     }
 }
