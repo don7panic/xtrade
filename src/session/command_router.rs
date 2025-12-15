@@ -67,7 +67,7 @@ pub struct CommandInfo {
 }
 
 /// Static help descriptions used for interactive commands
-const HELP_LINES: [&str; 13] = [
+const HELP_LINES: [&str; 14] = [
     "XTrade Interactive Commands:",
     "  /add <symbol1> [symbol2] ...  - Subscribe to symbols",
     "  /remove <symbol1> [symbol2] ... - Unsubscribe from symbols",
@@ -77,14 +77,15 @@ const HELP_LINES: [&str; 13] = [
     "  /reconnect                    - Force reconnection for all subscriptions",
     "  /logs                         - Show recent logs",
     "  /config [show|set|reset]      - Configuration management",
-    "  /alert list                   - List configured alerts",
-    "  /alert clear <id|all>         - Clear alerts",
+    "  /alert:add <symbol> <above|below> <price> - Add price alert",
+    "  /alert:list                   - List configured alerts",
+    "  /alert:clear <id|all>         - Clear alerts",
     "  /help                         - Show this help",
     "  /quit                         - Exit the application",
 ];
 
 /// Static list of interactive commands with descriptions for UI surfaces
-const COMMANDS: [CommandInfo; 10] = [
+const COMMANDS: [CommandInfo; 13] = [
     CommandInfo {
         trigger: "/add",
         usage: "/add <symbol1> [symbol2] ...",
@@ -124,6 +125,21 @@ const COMMANDS: [CommandInfo; 10] = [
         trigger: "/config",
         usage: "/config [show|set <key> <value>|reset]",
         description: "Configuration management",
+    },
+    CommandInfo {
+        trigger: "/alert:add",
+        usage: "/alert:add <symbol> <above|below|>|<|+|-> <price>",
+        description: "Add price alert",
+    },
+    CommandInfo {
+        trigger: "/alert:list",
+        usage: "/alert:list",
+        description: "List configured alerts",
+    },
+    CommandInfo {
+        trigger: "/alert:clear",
+        usage: "/alert:clear <id|all>",
+        description: "Clear alerts",
     },
     CommandInfo {
         trigger: "/help",
@@ -300,7 +316,37 @@ impl CommandRouter {
                     ))
                 }
             }
-            "/alert" => self.parse_alert_command(&parts, default_symbol),
+            "/alert:add" => {
+                let (symbol, direction, price) =
+                    self.parse_alert_add_tokens(&parts[1..], default_symbol)?;
+                Ok(Some(InteractiveCommand::Alert {
+                    action: AlertAction::Add {
+                        symbol,
+                        direction,
+                        price,
+                    },
+                }))
+            }
+            "/alert:list" => Ok(Some(InteractiveCommand::Alert {
+                action: AlertAction::List,
+            })),
+            "/alert:clear" => {
+                let token = parts.get(1).ok_or_else(|| {
+                    anyhow::anyhow!("Usage: /alert:clear <id|all>. Example: /alert:clear 1")
+                })?;
+
+                let target = if token.eq_ignore_ascii_case("all") {
+                    ClearTarget::All
+                } else {
+                    let id = token.parse::<u64>().map_err(|_| {
+                        anyhow::anyhow!("Invalid alert id '{}'. Expected a number.", token)
+                    })?;
+                    ClearTarget::Id(id)
+                };
+                Ok(Some(InteractiveCommand::Alert {
+                    action: AlertAction::Clear { target },
+                }))
+            }
             "/help" | "?" => Ok(Some(InteractiveCommand::Help)),
             "/logs" => Ok(Some(InteractiveCommand::Logs)),
             "/quit" | "/exit" | "/q" => Ok(Some(InteractiveCommand::Quit)),
@@ -331,72 +377,6 @@ impl CommandRouter {
         &COMMANDS
     }
 
-    fn parse_alert_command(
-        &self,
-        parts: &[&str],
-        default_symbol: Option<&str>,
-    ) -> Result<Option<InteractiveCommand>> {
-        if parts.len() < 2 {
-            return Err(anyhow::anyhow!(
-                "Usage: /alert add <symbol> <above|below> <price> | /alert list | /alert clear <id|all>. Shortcuts: /alert <symbol> >45000 or /alert >45000 (uses the selected symbol)."
-            ));
-        }
-
-        match parts[1] {
-            "add" => {
-                if parts.len() < 3 {
-                    return Err(anyhow::anyhow!(
-                        "Usage: /alert add <symbol> <above|below|>|<|+|-> <price>. Example: /alert add BTCUSDT > 45000"
-                    ));
-                }
-
-                let (symbol, direction, price) =
-                    self.parse_alert_add_tokens(&parts[2..], default_symbol)?;
-
-                Ok(Some(InteractiveCommand::Alert {
-                    action: AlertAction::Add {
-                        symbol,
-                        direction,
-                        price,
-                    },
-                }))
-            }
-            "list" => Ok(Some(InteractiveCommand::Alert {
-                action: AlertAction::List,
-            })),
-            "clear" => {
-                if parts.len() < 3 {
-                    return Err(anyhow::anyhow!(
-                        "Usage: /alert clear <id|all>. Example: /alert clear 1"
-                    ));
-                }
-                let target = if parts[2].eq_ignore_ascii_case("all") {
-                    ClearTarget::All
-                } else {
-                    let id = parts[2].parse::<u64>().map_err(|_| {
-                        anyhow::anyhow!("Invalid alert id '{}'. Expected a number.", parts[2])
-                    })?;
-                    ClearTarget::Id(id)
-                };
-                Ok(Some(InteractiveCommand::Alert {
-                    action: AlertAction::Clear { target },
-                }))
-            }
-            _ => {
-                // Shorthand: /alert <symbol?> <direction?> <price>
-                let (symbol, direction, price) =
-                    self.parse_alert_add_tokens(&parts[1..], default_symbol)?;
-                Ok(Some(InteractiveCommand::Alert {
-                    action: AlertAction::Add {
-                        symbol,
-                        direction,
-                        price,
-                    },
-                }))
-            }
-        }
-    }
-
     fn parse_alert_add_tokens(
         &self,
         tokens: &[&str],
@@ -404,7 +384,7 @@ impl CommandRouter {
     ) -> Result<(String, AlertDirection, f64)> {
         if tokens.is_empty() {
             return Err(anyhow::anyhow!(
-                "Usage: /alert <symbol> >45000 or /alert >45000 (uses the selected symbol)"
+                "Usage: /alert:add <symbol> >45000 or /alert:add >45000 (uses the selected symbol)"
             ));
         }
 
@@ -420,7 +400,7 @@ impl CommandRouter {
                 .map(|s| s.to_string())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Symbol required. Provide a symbol (e.g. '/alert BTCUSDT >45000') or select a symbol and use '/alert >45000'."
+                        "Symbol required. Provide a symbol (e.g. '/alert:add BTCUSDT >45000') or select a symbol and use '/alert:add >45000'."
                     )
                 })?
         } else {
@@ -437,7 +417,7 @@ impl CommandRouter {
     fn parse_direction_and_price(&self, tokens: &[&str]) -> Result<(AlertDirection, f64)> {
         if tokens.is_empty() {
             return Err(anyhow::anyhow!(
-                "Usage: /alert <symbol> >45000 or /alert <symbol> <above|below> <price>"
+                "Usage: /alert:add <symbol> >45000 or /alert:add <symbol> <above|below> <price>"
             ));
         }
 
@@ -457,7 +437,7 @@ impl CommandRouter {
                 return Ok((direction, price));
             } else {
                 return Err(anyhow::anyhow!(
-                    "Missing price. Try '/alert <symbol> >45000'"
+                    "Missing price. Try '/alert:add <symbol> >45000'"
                 ));
             }
         }
@@ -466,7 +446,7 @@ impl CommandRouter {
         if let Some(direction) = self.parse_direction_token(first) {
             if tokens.len() < 2 {
                 return Err(anyhow::anyhow!(
-                    "Missing price. Try '/alert <symbol> {} <price>'",
+                    "Missing price. Try '/alert:add <symbol> {} <price>'",
                     first
                 ));
             }
@@ -482,7 +462,7 @@ impl CommandRouter {
         }
 
         Err(anyhow::anyhow!(
-            "Could not parse alert. Use '/alert <symbol> >45000' or '/alert <symbol> <above|below> <price>'."
+            "Could not parse alert. Use '/alert:add <symbol> >45000' or '/alert:add <symbol> <above|below> <price>'."
         ))
     }
 

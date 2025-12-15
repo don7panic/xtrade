@@ -254,7 +254,7 @@ fn handle_alert_popup_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction 
         KeyCode::Enter => match app.alert_price() {
             Ok(price) => {
                 let command = format!(
-                    "/alert {} {} {}",
+                    "/alert:add {} {} {}",
                     app.alert_form.symbol,
                     if app.alert_form.direction_above {
                         "above"
