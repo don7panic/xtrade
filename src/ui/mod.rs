@@ -5,9 +5,6 @@
 /// TUI application state and rendering
 pub mod tui;
 
-/// Simple CLI output functions
-pub mod cli;
-
 /// UI Manager for interactive interface
 pub mod ui_manager;
 
@@ -312,7 +309,7 @@ impl AppState {
     /// Apply the selected suggestion to the command buffer
     pub fn apply_selected_suggestion(&mut self) {
         if let Some(cmd) = self.selected_command() {
-            self.command_buffer = cmd.usage.to_string();
+            self.command_buffer = cmd.trigger.to_string();
             self.reset_command_suggestions();
             self.update_command_suggestions();
         }

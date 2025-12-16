@@ -1061,6 +1061,17 @@ fn render_command_palette(
         .wrap(Wrap { trim: true });
         frame.render_widget(input_line, layout[0]);
 
+        let prompt_offset = 2u16; // ">" plus trailing space
+        let max_cursor_x = layout[0]
+            .x
+            .saturating_add(layout[0].width.saturating_sub(1));
+        let cursor_x = layout[0]
+            .x
+            .saturating_add(prompt_offset)
+            .saturating_add(app.command_buffer.len() as u16)
+            .min(max_cursor_x);
+        frame.set_cursor(cursor_x, layout[0].y);
+
         let suggestion_items: Vec<ListItem> = if app.filtered_commands.is_empty() {
             vec![ListItem::new(Span::styled(
                 "No matching commands",
