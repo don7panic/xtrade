@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::market_data::MarketEvent;
 use crate::metrics::ConnectionMetrics;
+use crate::session::alert_manager::Alert;
 use crate::session::command_router::InteractiveCommand;
 
 /// Session events for communication between components
@@ -52,6 +53,8 @@ pub enum SessionEvent {
     AlertNotification { message: String },
     /// Alert list for UI display
     AlertList { entries: Vec<String> },
+    /// Full alert snapshot for UI surfaces
+    AlertSnapshot { alerts: Vec<Alert> },
     /// User command from interactive input
     UserCommand { command: InteractiveCommand },
 }

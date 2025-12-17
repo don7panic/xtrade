@@ -11,6 +11,7 @@ pub mod ui_manager;
 use crate::binance::types::OrderBook;
 use crate::market_data::DailyCandle;
 use crate::metrics::ConnectionMetrics;
+use crate::session::alert_manager::Alert;
 use crate::session::command_router::{CommandInfo, CommandRouter};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -33,6 +34,8 @@ pub struct AppState {
     pub filtered_commands: Vec<CommandInfo>,
     pub selected_command_index: usize,
     pub alert_form: AlertFormState,
+    pub alerts: Vec<Alert>,
+    pub selected_alert_index: usize,
 }
 
 /// Market data state for a single symbol
@@ -87,6 +90,7 @@ pub enum InputMode {
     Normal,
     Command,
     AlertPopup,
+    Alerts,
 }
 
 /// Simple alert form state for popup interaction
@@ -118,6 +122,8 @@ impl AppState {
             filtered_commands: CommandRouter::commands().to_vec(),
             selected_command_index: 0,
             alert_form: AlertFormState::default(),
+            alerts: Vec::new(),
+            selected_alert_index: 0,
         }
     }
 
@@ -194,6 +200,25 @@ impl AppState {
         }
     }
 
+    /// Replace alert list snapshot
+    pub fn update_alerts(&mut self, alerts: Vec<Alert>) {
+        self.alerts = alerts;
+        self.normalize_selected_alert();
+    }
+
+    /// Enter the alerts list view
+    pub fn enter_alerts_view(&mut self) {
+        self.input_mode = InputMode::Alerts;
+        self.normalize_selected_alert();
+    }
+
+    /// Exit the alerts list view back to normal mode
+    pub fn exit_alerts_view(&mut self) {
+        if matches!(self.input_mode, InputMode::Alerts) {
+            self.input_mode = InputMode::Normal;
+        }
+    }
+
     /// Clear the command buffer
     pub fn clear_command(&mut self) {
         self.command_buffer.clear();
@@ -250,6 +275,41 @@ impl AppState {
             .trim()
             .parse::<f64>()
             .map_err(|_| "Price must be a number".to_string())
+    }
+
+    /// Select next alert in the list
+    pub fn select_next_alert(&mut self) {
+        if self.alerts.is_empty() {
+            return;
+        }
+        let last = self.alerts.len().saturating_sub(1);
+        if self.selected_alert_index < last {
+            self.selected_alert_index += 1;
+        }
+    }
+
+    /// Select previous alert in the list
+    pub fn select_previous_alert(&mut self) {
+        if self.alerts.is_empty() {
+            return;
+        }
+        if self.selected_alert_index > 0 {
+            self.selected_alert_index -= 1;
+        }
+    }
+
+    /// Get selected alert, if any
+    pub fn selected_alert(&self) -> Option<&Alert> {
+        self.alerts.get(self.selected_alert_index)
+    }
+
+    /// Ensure selected alert index remains valid
+    fn normalize_selected_alert(&mut self) {
+        if self.alerts.is_empty() {
+            self.selected_alert_index = 0;
+        } else if self.selected_alert_index >= self.alerts.len() {
+            self.selected_alert_index = self.alerts.len() - 1;
+        }
     }
 
     /// Reset command suggestions to the full list

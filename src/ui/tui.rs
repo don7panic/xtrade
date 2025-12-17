@@ -28,6 +28,7 @@ use ratatui::{
 use super::{AppState, InputMode, MarketDataState};
 use crate::AppResult;
 use crate::metrics::ConnectionStatus as MetricsConnectionStatus;
+use crate::session::alert_manager::AlertDirection;
 use crate::session::session_manager::SessionStats;
 
 /// Actions generated from key handling
@@ -137,6 +138,7 @@ pub fn handle_key_event(app: &mut AppState, key_event: KeyEvent) -> UiAction {
         InputMode::Normal => handle_normal_mode_keys(app, key_event),
         InputMode::Command => handle_command_mode_keys(app, key_event),
         InputMode::AlertPopup => handle_alert_popup_keys(app, key_event),
+        InputMode::Alerts => handle_alerts_mode_keys(app, key_event),
     }
 }
 
@@ -188,6 +190,10 @@ fn handle_normal_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction 
             app.activate_command_mode(Some("/logs"));
             UiAction::None
         }
+        KeyCode::Char('A') if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.enter_alerts_view();
+            UiAction::SubmitCommand("/alert:list".to_string())
+        }
         KeyCode::Enter => UiAction::None,
         _ => UiAction::None,
     }
@@ -237,6 +243,39 @@ fn handle_command_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction
             UiAction::None
         }
         KeyCode::Left | KeyCode::Right => UiAction::None,
+        _ => UiAction::None,
+    }
+}
+
+fn handle_alerts_mode_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction {
+    match key_event.code {
+        KeyCode::Esc => {
+            app.exit_alerts_view();
+            UiAction::None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.select_previous_alert();
+            UiAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.select_next_alert();
+            UiAction::None
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if let Some(alert) = app.selected_alert() {
+                UiAction::SubmitCommand(format!("/alert:clear {}", alert.id))
+            } else {
+                UiAction::None
+            }
+        }
+        KeyCode::Char('C') if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+            UiAction::SubmitCommand("/alert:clear all".to_string())
+        }
+        KeyCode::Char('r') => UiAction::SubmitCommand("/alert:list".to_string()),
+        KeyCode::Char('q') => {
+            app.exit_alerts_view();
+            UiAction::None
+        }
         _ => UiAction::None,
     }
 }
@@ -342,6 +381,10 @@ fn render_root(
 
     render_logs(frame, chunks[2], app, render_state);
     render_command_palette(frame, chunks[3], app, render_state);
+
+    if matches!(app.input_mode, InputMode::Alerts) {
+        render_alerts_overlay(frame, app);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &AppState, session_stats: &SessionStats) {
@@ -896,6 +939,114 @@ fn render_logs(
     frame.render_widget(list, inner);
 }
 
+fn render_alerts_overlay(frame: &mut Frame<'_>, app: &AppState) {
+    let overlay_area = centered_rect(80, 60, frame.size());
+    frame.render_widget(Clear, overlay_area);
+
+    let block = Block::default()
+        .title(" Alerts ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Magenta));
+    frame.render_widget(block.clone(), overlay_area);
+
+    let inner = block.inner(overlay_area);
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .margin(1)
+        .split(inner);
+
+    let total = app.alerts.len();
+    let triggered = app.alerts.iter().filter(|a| a.triggered).count();
+    let armed = total.saturating_sub(triggered);
+    let summary = Paragraph::new(format!(
+        "Total: {}  | Armed: {}  | Triggered: {}",
+        total, armed, triggered
+    ))
+    .style(Style::default().fg(Color::Gray));
+    frame.render_widget(summary, layout[0]);
+
+    if app.alerts.is_empty() {
+        let placeholder = Paragraph::new("No alerts configured")
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Center);
+        frame.render_widget(placeholder, layout[1]);
+    } else {
+        let widths = [
+            Constraint::Length(6),
+            Constraint::Length(12),
+            Constraint::Length(8),
+            Constraint::Length(14),
+            Constraint::Length(14),
+            Constraint::Length(12),
+        ];
+
+        let rows: Vec<Row> = app
+            .alerts
+            .iter()
+            .enumerate()
+            .map(|(idx, alert)| {
+                let direction = match alert.direction {
+                    AlertDirection::Above => "Above",
+                    AlertDirection::Below => "Below",
+                };
+                let status = if alert.triggered {
+                    "Triggered"
+                } else {
+                    "Armed"
+                };
+                let last_price = alert
+                    .last_price
+                    .map(|p| format!("{:.4}", p))
+                    .unwrap_or_else(|| "-".to_string());
+
+                let mut row = Row::new(vec![
+                    Cell::from(format!("#{}", alert.id)),
+                    Cell::from(alert.symbol.clone()),
+                    Cell::from(direction),
+                    Cell::from(format!("{:.4}", alert.threshold)),
+                    Cell::from(last_price),
+                    Cell::from(status),
+                ]);
+
+                if idx == app.selected_alert_index {
+                    row = row.style(
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                } else if alert.triggered {
+                    row = row.style(Style::default().fg(Color::Red));
+                }
+
+                row
+            })
+            .collect();
+
+        let table = Table::new(rows, widths)
+            .header(
+                Row::new(vec!["ID", "Symbol", "Dir", "Threshold", "Last", "State"]).style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+            .column_spacing(1);
+
+        frame.render_widget(table, layout[1]);
+    }
+
+    let hints = Paragraph::new("↑/↓ move   d delete   Shift+C clear all   r refresh   Esc close")
+        .style(Style::default().fg(Color::Gray));
+    frame.render_widget(hints, layout[2]);
+}
+
 fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppState) {
     // Centered box occupying a portion of the screen
     let popup_area = centered_rect(50, 20, frame.size());
@@ -1041,6 +1192,7 @@ fn render_command_palette(
         InputMode::Normal => " Command Hints ",
         InputMode::Command => " Command Entry ",
         InputMode::AlertPopup => " Command Hints ",
+        InputMode::Alerts => " Alerts ",
     };
 
     let block = Block::default().title(title).borders(Borders::ALL);
@@ -1123,6 +1275,8 @@ fn render_command_palette(
             Span::raw(": Scroll logs   "),
             Span::styled("a", Style::default().fg(Color::Cyan)),
             Span::raw(": Alert popup   "),
+            Span::styled("Shift+A", Style::default().fg(Color::Cyan)),
+            Span::raw(": Alerts view   "),
             Span::styled("/", Style::default().fg(Color::Cyan)),
             Span::raw(": Command palette   "),
             Span::styled("Space", Style::default().fg(Color::Cyan)),

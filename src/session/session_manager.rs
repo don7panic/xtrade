@@ -762,6 +762,7 @@ impl SessionManager {
                         alert.id, alert.symbol, alert.direction, alert.threshold
                     );
                     self.emit_alert_notification(message);
+                    self.send_alert_snapshot();
                 }
                 Err(e) => {
                     let message = format!("Failed to add alert: {}", e);
@@ -775,7 +776,7 @@ impl SessionManager {
                 if alerts.is_empty() {
                     entries.push("No alerts configured.".to_string());
                 } else {
-                    for alert in alerts {
+                    for alert in &alerts {
                         let status = if alert.triggered {
                             "triggered"
                         } else {
@@ -792,6 +793,9 @@ impl SessionManager {
                     self.forward_to_ui(SessionEvent::AlertList {
                         entries: entries.clone(),
                     });
+                    self.forward_to_ui(SessionEvent::AlertSnapshot {
+                        alerts: alerts.clone(),
+                    });
                 } else {
                     for entry in &entries {
                         println!("{}", entry);
@@ -803,11 +807,13 @@ impl SessionManager {
                     let removed = self.alert_manager.clear_all();
                     let message = format!("Cleared {} alerts", removed);
                     self.emit_alert_notification(message);
+                    self.send_alert_snapshot();
                 }
                 ClearTarget::Id(id) => {
                     if self.alert_manager.clear_alert(id) {
                         let message = format!("Cleared alert #{}", id);
                         self.emit_alert_notification(message);
+                        self.send_alert_snapshot();
                     } else {
                         let message = format!("Alert #{} not found", id);
                         self.action_channel
@@ -839,6 +845,14 @@ impl SessionManager {
             });
         } else {
             println!("{}", message);
+        }
+    }
+
+    /// Send the current alert snapshot to UI surfaces
+    fn send_alert_snapshot(&self) {
+        if self.config.enable_tui {
+            let alerts = self.alert_manager.list_alerts();
+            self.forward_to_ui(SessionEvent::AlertSnapshot { alerts });
         }
     }
 
@@ -917,7 +931,7 @@ impl SessionManager {
     /// Evaluate alerts for a symbol and emit notifications
     fn evaluate_alerts(&mut self, symbol: &str, price: f64) -> Result<()> {
         let normalized = symbol.to_ascii_uppercase();
-        let triggers = self.alert_manager.evaluate_price(&normalized, price);
+        let (triggers, state_changed) = self.alert_manager.evaluate_price(&normalized, price);
 
         for trigger in triggers {
             let direction_str = match trigger.direction {
@@ -929,6 +943,10 @@ impl SessionManager {
                 trigger.id, trigger.symbol, direction_str, trigger.threshold, trigger.price
             );
             self.emit_alert_notification(message);
+        }
+
+        if state_changed {
+            self.send_alert_snapshot();
         }
 
         Ok(())

@@ -105,14 +105,16 @@ impl AlertManager {
     }
 
     /// Evaluate alerts for a symbol against the latest price and return any triggers
-    pub fn evaluate_price(&mut self, symbol: &str, price: f64) -> Vec<AlertTrigger> {
+    pub fn evaluate_price(&mut self, symbol: &str, price: f64) -> (Vec<AlertTrigger>, bool) {
         if !price.is_finite() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
         let mut triggers = Vec::new();
+        let mut state_changed = false;
 
         for alert in self.alerts.iter_mut().filter(|a| a.symbol == symbol) {
+            let was_triggered = alert.triggered;
             let previous_price = alert.last_price;
 
             match alert.direction {
@@ -155,9 +157,13 @@ impl AlertManager {
             }
 
             alert.last_price = Some(price);
+
+            if alert.triggered != was_triggered {
+                state_changed = true;
+            }
         }
 
-        triggers
+        (triggers, state_changed)
     }
 }
 
@@ -197,18 +203,26 @@ mod tests {
             .unwrap();
 
         // No trigger below threshold
-        assert!(mgr.evaluate_price("ETHUSDT", 1995.0).is_empty());
+        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 1995.0);
+        assert!(triggers.is_empty());
+        assert!(!changed);
         // Trigger on crossing above
-        let triggers = mgr.evaluate_price("ETHUSDT", 2001.0);
+        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 2001.0);
         assert_eq!(triggers.len(), 1);
         assert_eq!(triggers[0].id, 1);
+        assert!(changed);
         // Stay above should not re-trigger
-        assert!(mgr.evaluate_price("ETHUSDT", 2005.0).is_empty());
+        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 2005.0);
+        assert!(triggers.is_empty());
+        assert!(!changed);
         // Drop below to re-arm
-        assert!(mgr.evaluate_price("ETHUSDT", 1990.0).is_empty());
+        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 1990.0);
+        assert!(triggers.is_empty());
+        assert!(changed);
         // Cross above again should trigger
-        let triggers = mgr.evaluate_price("ETHUSDT", 2005.0);
+        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 2005.0);
         assert_eq!(triggers.len(), 1);
+        assert!(changed);
     }
 
     #[test]
@@ -217,8 +231,10 @@ mod tests {
         mgr.add_alert("BTCUSDT", AlertDirection::Below, 30_000.0)
             .unwrap();
 
-        assert!(mgr.evaluate_price("BTCUSDT", 30_100.0).is_empty());
-        let triggers = mgr.evaluate_price("BTCUSDT", 29_999.0);
+        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 30_100.0);
+        assert!(triggers.is_empty());
+        assert!(!changed);
+        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 29_999.0);
         assert_eq!(triggers.len(), 1);
         assert_eq!(
             triggers[0],
@@ -230,10 +246,16 @@ mod tests {
                 price: 29_999.0
             }
         );
-        assert!(mgr.evaluate_price("BTCUSDT", 29_500.0).is_empty());
-        assert!(mgr.evaluate_price("BTCUSDT", 30_500.0).is_empty()); // re-arm
-        let retrigger = mgr.evaluate_price("BTCUSDT", 29_500.0);
+        assert!(changed);
+        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 29_500.0);
+        assert!(triggers.is_empty());
+        assert!(!changed);
+        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 30_500.0); // re-arm
+        assert!(triggers.is_empty());
+        assert!(changed);
+        let (retrigger, changed) = mgr.evaluate_price("BTCUSDT", 29_500.0);
         assert_eq!(retrigger.len(), 1);
+        assert!(changed);
     }
 
     #[test]

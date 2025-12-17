@@ -605,6 +605,9 @@ impl UIManager {
                 self.app_state.push_log(format!("[alert] {}", message));
                 self.app_state.push_notification(message);
             }
+            SessionEvent::AlertSnapshot { alerts } => {
+                self.app_state.update_alerts(alerts);
+            }
             SessionEvent::AlertList { entries } => {
                 if entries.is_empty() {
                     self.render_state
