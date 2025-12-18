@@ -11,10 +11,11 @@ use crate::cli::Cli;
 use crate::config::Config;
 use crate::market_data::MarketDataManager;
 use crate::metrics::{ConnectionStatus as MetricsConnectionStatus, MetricsCollector};
+use crate::notify::SystemNotifier;
 use crate::ui::ui_manager::UIManager;
 
 use super::action_channel::{ActionChannel, SessionEvent};
-use super::alert_manager::{AlertDirection, AlertManager};
+use super::alert_manager::{AlertDirection, AlertManager, AlertTrigger};
 use super::command_router::{AlertAction, ClearTarget, CommandRouter, InteractiveCommand};
 
 /// Session state tracking
@@ -106,6 +107,8 @@ pub struct SessionManager {
     action_channel: ActionChannel,
     /// Price alert manager
     alert_manager: AlertManager,
+    /// System notifier for desktop alerts
+    system_notifier: SystemNotifier,
     /// Shutdown signal sender
     shutdown_tx: mpsc::Sender<()>,
     /// Shutdown signal receiver
@@ -131,6 +134,9 @@ impl SessionManager {
 
         // Create alert manager
         let alert_manager = AlertManager::new();
+
+        // Create system notifier (macOS implemented, extensible for Windows)
+        let system_notifier = SystemNotifier::new(env!("CARGO_PKG_NAME"));
 
         // Create session config from CLI
         let session_config = SessionConfig {
@@ -158,6 +164,7 @@ impl SessionManager {
             command_router,
             action_channel,
             alert_manager,
+            system_notifier,
             shutdown_tx,
             shutdown_rx: Some(shutdown_rx),
         })
@@ -848,6 +855,20 @@ impl SessionManager {
         }
     }
 
+    /// Emit a system-level notification for a triggered price alert (fire-and-forget)
+    fn send_price_trigger_notification(&self, trigger: &AlertTrigger) {
+        let direction = match trigger.direction {
+            AlertDirection::Above => ">=",
+            AlertDirection::Below => "<=",
+        };
+        let title = format!("{} price alert", trigger.symbol);
+        let body = format!(
+            "Price {} {:.6} (last {})",
+            direction, trigger.threshold, trigger.price
+        );
+        self.system_notifier.notify(title, body);
+    }
+
     /// Send the current alert snapshot to UI surfaces
     fn send_alert_snapshot(&self) {
         if self.config.enable_tui {
@@ -943,6 +964,7 @@ impl SessionManager {
                 trigger.id, trigger.symbol, direction_str, trigger.threshold, trigger.price
             );
             self.emit_alert_notification(message);
+            self.send_price_trigger_notification(&trigger);
         }
 
         if state_changed {
