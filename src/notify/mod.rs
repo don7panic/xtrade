@@ -255,24 +255,3 @@ fn send_linux_notification(app_name: &str, title: &str, body: &str) -> anyhow::R
         .map(|_| ())
         .with_context(|| "failed to show Linux desktop notification")
 }
-
-#[cfg(target_os = "windows")]
-#[derive(Clone)]
-struct WindowsNotifier {
-    app_name: String,
-}
-
-#[cfg(target_os = "windows")]
-impl WindowsNotifier {
-    fn new(app_name: String) -> Self {
-        Self { app_name }
-    }
-
-    fn notify_async(&self, _title: String, _body: String) {
-        // TODO: Wire up WinRT toast notifications (e.g., via winrt-notification crate).
-        tracing::debug!(
-            app = %self.app_name,
-            "Windows notifications not implemented; skipping"
-        );
-    }
-}
