@@ -17,6 +17,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use super::AppState;
 use crate::AppResult;
+use crate::session::alert_manager::{AlertDirection, AlertOptions};
 use crate::session::session_manager::SessionStats;
 use crate::ui::ui_manager::RenderState;
 
@@ -27,6 +28,12 @@ use render::render_root;
 pub enum UiAction {
     None,
     SubmitCommand(String),
+    SubmitAlert {
+        symbol: String,
+        direction: AlertDirection,
+        price: f64,
+        options: AlertOptions,
+    },
     QuitRequested,
 }
 

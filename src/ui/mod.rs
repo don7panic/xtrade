@@ -11,7 +11,7 @@ pub mod ui_manager;
 use crate::binance::types::OrderBook;
 use crate::market_data::DailyCandle;
 use crate::metrics::ConnectionMetrics;
-use crate::session::alert_manager::Alert;
+use crate::session::alert_manager::{Alert, AlertDirection, AlertOptions, AlertRepeat};
 use crate::session::command_router::{CommandInfo, CommandRouter};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -93,14 +93,44 @@ pub enum InputMode {
     Alerts,
 }
 
+/// Active field in the alert popup form
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertFormField {
+    Direction,
+    Price,
+    Mode,
+    Cooldown,
+    Hysteresis,
+}
+
 /// Simple alert form state for popup interaction
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AlertFormState {
     pub symbol: String,
     pub direction_above: bool,
     pub price_input: String,
     pub error: Option<String>,
     pub price_dirty: bool,
+    pub repeat: AlertRepeat,
+    pub cooldown_input: String,
+    pub hysteresis_input: String,
+    pub active_field: AlertFormField,
+}
+
+impl Default for AlertFormState {
+    fn default() -> Self {
+        Self {
+            symbol: String::new(),
+            direction_above: true,
+            price_input: String::new(),
+            error: None,
+            price_dirty: false,
+            repeat: AlertRepeat::Repeat,
+            cooldown_input: String::new(),
+            hysteresis_input: String::new(),
+            active_field: AlertFormField::Price,
+        }
+    }
 }
 
 impl AppState {
@@ -252,6 +282,10 @@ impl AppState {
             price_input: price_string,
             error: None,
             price_dirty: false,
+            repeat: AlertRepeat::Repeat,
+            cooldown_input: String::new(),
+            hysteresis_input: String::new(),
+            active_field: AlertFormField::Price,
         };
         self.input_mode = InputMode::AlertPopup;
         Ok(())
@@ -268,6 +302,33 @@ impl AppState {
         self.alert_form.direction_above = !self.alert_form.direction_above;
     }
 
+    /// Cycle alert repeat mode
+    pub fn toggle_alert_repeat(&mut self) {
+        self.alert_form.repeat = match self.alert_form.repeat {
+            AlertRepeat::Once => AlertRepeat::Repeat,
+            AlertRepeat::Repeat => AlertRepeat::Once,
+        };
+    }
+
+    /// Cycle the active popup field
+    pub fn cycle_alert_popup_field(&mut self, reverse: bool) {
+        use AlertFormField::*;
+
+        let order = [Direction, Mode, Price, Cooldown, Hysteresis];
+        let len = order.len();
+        let current = self.alert_form.active_field;
+        let idx = order
+            .iter()
+            .position(|field| *field == current)
+            .unwrap_or(0);
+        let next_idx = if reverse {
+            idx.checked_sub(1).unwrap_or(len - 1)
+        } else {
+            (idx + 1) % len
+        };
+        self.alert_form.active_field = order[next_idx];
+    }
+
     /// Attempt to parse the alert price from input
     pub fn alert_price(&self) -> Result<f64, String> {
         self.alert_form
@@ -275,6 +336,59 @@ impl AppState {
             .trim()
             .parse::<f64>()
             .map_err(|_| "Price must be a number".to_string())
+    }
+
+    /// Get the alert direction for the popup form
+    pub fn alert_direction(&self) -> AlertDirection {
+        if self.alert_form.direction_above {
+            AlertDirection::Above
+        } else {
+            AlertDirection::Below
+        }
+    }
+
+    /// Parse alert options from popup inputs
+    pub fn alert_options(&self, threshold: f64) -> Result<AlertOptions, String> {
+        let cooldown_ms = if self.alert_form.cooldown_input.trim().is_empty() {
+            0
+        } else {
+            let seconds = self
+                .alert_form
+                .cooldown_input
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "Cooldown must be a number of seconds".to_string())?;
+            seconds.saturating_mul(1_000)
+        };
+
+        let hysteresis = if self.alert_form.hysteresis_input.trim().is_empty() {
+            0.0
+        } else {
+            let raw = self.alert_form.hysteresis_input.trim();
+            if let Some(stripped) = raw.strip_suffix('%') {
+                let pct = stripped
+                    .parse::<f64>()
+                    .map_err(|_| "Hysteresis percent must be a number like 0.2%".to_string())?;
+                if !pct.is_finite() || pct < 0.0 {
+                    return Err("Hysteresis percent must be non-negative".to_string());
+                }
+                threshold * (pct / 100.0)
+            } else {
+                let abs = raw
+                    .parse::<f64>()
+                    .map_err(|_| "Hysteresis must be a number or percent".to_string())?;
+                if !abs.is_finite() || abs < 0.0 {
+                    return Err("Hysteresis must be non-negative".to_string());
+                }
+                abs
+            }
+        };
+
+        Ok(AlertOptions {
+            repeat: self.alert_form.repeat,
+            cooldown_ms,
+            hysteresis,
+        })
     }
 
     /// Select next alert in the list
@@ -431,7 +545,7 @@ impl MarketDataState {
             return;
         }
 
-        let max_candles = std::cmp::max(1, (width / 2) as usize);
+        let max_candles = std::cmp::max(1, width as usize);
         let len = self.daily_candles.len();
         let take = len.min(max_candles);
         let start = len - take;
@@ -611,12 +725,12 @@ mod tests {
         }
 
         let cache = state.ensure_kline_cache(12).expect("cache should build");
-        // Width 12 allows at most 6 candles (width/2)
-        assert_eq!(cache.samples.len(), 6);
+        // Width 12 allows at most 12 candles (one column per candle)
+        assert_eq!(cache.samples.len(), 12);
         // Expect the cache to use the most recent candles
         assert_eq!(
             cache.samples.first().unwrap().open_time_ms,
-            1_000 + 14 * 1_000
+            1_000 + 8 * 1_000
         );
         assert_eq!(
             cache.samples.last().unwrap().close_time_ms,

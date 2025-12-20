@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::UiAction;
-use crate::ui::{AppState, InputMode};
+use crate::ui::{AlertFormField, AppState, InputMode};
 
 /// Handle keyboard events for TUI, returning actions for the session manager
 pub fn handle_key_event(app: &mut AppState, key_event: KeyEvent) -> UiAction {
@@ -192,47 +192,97 @@ fn handle_alert_popup_keys(app: &mut AppState, key_event: KeyEvent) -> UiAction 
             app.deactivate_alert_popup();
             UiAction::None
         }
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-            app.toggle_alert_direction();
+        KeyCode::Up => {
+            app.cycle_alert_popup_field(true);
             UiAction::None
         }
-        KeyCode::Enter => match app.alert_price() {
-            Ok(price) => {
-                let command = format!(
-                    "/alert:add {} {} {}",
-                    app.alert_form.symbol,
-                    if app.alert_form.direction_above {
-                        "above"
-                    } else {
-                        "below"
-                    },
-                    price
-                );
-                app.deactivate_alert_popup();
-                UiAction::SubmitCommand(command)
-            }
-            Err(e) => {
-                app.alert_form.error = Some(e);
+        KeyCode::Down => {
+            app.cycle_alert_popup_field(false);
+            UiAction::None
+        }
+        KeyCode::Tab => match app.alert_form.active_field {
+            AlertFormField::Direction => {
+                app.toggle_alert_direction();
                 UiAction::None
             }
-        },
-        KeyCode::Backspace => {
-            if !app.alert_form.price_dirty {
-                app.alert_form.price_input.clear();
-                app.alert_form.price_dirty = true;
+            AlertFormField::Mode => {
+                app.toggle_alert_repeat();
+                UiAction::None
             }
-            app.alert_form.price_input.pop();
-            app.alert_form.error = None;
+            _ => UiAction::None,
+        },
+        KeyCode::Enter => {
+            let price = match app.alert_price() {
+                Ok(price) => price,
+                Err(e) => {
+                    app.alert_form.error = Some(e);
+                    return UiAction::None;
+                }
+            };
+            let options = match app.alert_options(price) {
+                Ok(options) => options,
+                Err(e) => {
+                    app.alert_form.error = Some(e);
+                    return UiAction::None;
+                }
+            };
+            let symbol = app.alert_form.symbol.clone();
+            let direction = app.alert_direction();
+            app.deactivate_alert_popup();
+            UiAction::SubmitAlert {
+                symbol,
+                direction,
+                price,
+                options,
+            }
+        }
+        KeyCode::Backspace => {
+            match app.alert_form.active_field {
+                AlertFormField::Price => {
+                    if !app.alert_form.price_dirty {
+                        app.alert_form.price_input.clear();
+                        app.alert_form.price_dirty = true;
+                    }
+                    app.alert_form.price_input.pop();
+                    app.alert_form.error = None;
+                }
+                AlertFormField::Cooldown => {
+                    app.alert_form.cooldown_input.pop();
+                    app.alert_form.error = None;
+                }
+                AlertFormField::Hysteresis => {
+                    app.alert_form.hysteresis_input.pop();
+                    app.alert_form.error = None;
+                }
+                _ => {}
+            }
             UiAction::None
         }
         KeyCode::Char(c) => {
-            if c.is_ascii_digit() || c == '.' || c == '-' || c == '+' {
-                if !app.alert_form.price_dirty {
-                    app.alert_form.price_input.clear();
-                    app.alert_form.price_dirty = true;
+            match app.alert_form.active_field {
+                AlertFormField::Price => {
+                    if c.is_ascii_digit() || c == '.' || c == '-' || c == '+' {
+                        if !app.alert_form.price_dirty {
+                            app.alert_form.price_input.clear();
+                            app.alert_form.price_dirty = true;
+                        }
+                        app.alert_form.price_input.push(c);
+                        app.alert_form.error = None;
+                    }
                 }
-                app.alert_form.price_input.push(c);
-                app.alert_form.error = None;
+                AlertFormField::Cooldown => {
+                    if c.is_ascii_digit() {
+                        app.alert_form.cooldown_input.push(c);
+                        app.alert_form.error = None;
+                    }
+                }
+                AlertFormField::Hysteresis => {
+                    if c.is_ascii_digit() || c == '.' || c == '%' {
+                        app.alert_form.hysteresis_input.push(c);
+                        app.alert_form.error = None;
+                    }
+                }
+                _ => {}
             }
             UiAction::None
         }

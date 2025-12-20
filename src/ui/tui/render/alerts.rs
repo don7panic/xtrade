@@ -4,8 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
-use crate::session::alert_manager::AlertDirection;
-use crate::ui::AppState;
+use crate::session::alert_manager::{AlertDirection, AlertRepeat};
+use crate::ui::{AlertFormField, AppState};
 
 use super::layout::centered_rect;
 
@@ -49,11 +49,14 @@ pub(super) fn render_alerts_overlay(frame: &mut Frame<'_>, app: &AppState) {
     } else {
         let widths = [
             Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Length(6),
             Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(10),
             Constraint::Length(8),
-            Constraint::Length(14),
-            Constraint::Length(14),
-            Constraint::Length(12),
+            Constraint::Length(6),
+            Constraint::Length(8),
         ];
 
         let rows: Vec<Row> = app
@@ -74,6 +77,20 @@ pub(super) fn render_alerts_overlay(frame: &mut Frame<'_>, app: &AppState) {
                     .last_price
                     .map(|p| format!("{:.4}", p))
                     .unwrap_or_else(|| "-".to_string());
+                let mode = match alert.repeat {
+                    AlertRepeat::Once => "Once",
+                    AlertRepeat::Repeat => "Repeat",
+                };
+                let cooldown = if alert.cooldown_ms > 0 {
+                    format!("{}s", alert.cooldown_ms / 1_000)
+                } else {
+                    "-".to_string()
+                };
+                let hysteresis = if alert.hysteresis > 0.0 {
+                    format!("{:.4}", alert.hysteresis)
+                } else {
+                    "-".to_string()
+                };
 
                 let mut row = Row::new(vec![
                     Cell::from(format!("#{}", alert.id)),
@@ -82,6 +99,9 @@ pub(super) fn render_alerts_overlay(frame: &mut Frame<'_>, app: &AppState) {
                     Cell::from(format!("{:.4}", alert.threshold)),
                     Cell::from(last_price),
                     Cell::from(status),
+                    Cell::from(mode),
+                    Cell::from(cooldown),
+                    Cell::from(hysteresis),
                 ]);
 
                 if idx == app.selected_alert_index {
@@ -101,7 +121,18 @@ pub(super) fn render_alerts_overlay(frame: &mut Frame<'_>, app: &AppState) {
 
         let table = Table::new(rows, widths)
             .header(
-                Row::new(vec!["ID", "Symbol", "Dir", "Threshold", "Last", "State"]).style(
+                Row::new(vec![
+                    "ID",
+                    "Symbol",
+                    "Dir",
+                    "Threshold",
+                    "Last",
+                    "State",
+                    "Mode",
+                    "CD",
+                    "Hys",
+                ])
+                .style(
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -119,7 +150,7 @@ pub(super) fn render_alerts_overlay(frame: &mut Frame<'_>, app: &AppState) {
 
 pub(super) fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppState) {
     // Centered box occupying a portion of the screen
-    let popup_area = centered_rect(50, 20, frame.size());
+    let popup_area = centered_rect(62, 32, frame.size());
     let block = Block::default()
         .title(" Add Alert ")
         .borders(Borders::ALL)
@@ -135,11 +166,29 @@ pub(super) fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppSt
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Length(1),
         ])
         .margin(1)
         .split(inner_area);
+
+    let active_field = app.alert_form.active_field;
+    let active_label_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+    let active_value_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(Color::Cyan);
+    let value_style = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .fg(Color::White);
 
     // Symbol row
     let symbol_text = format!("Symbol: {}", app.alert_form.symbol);
@@ -151,6 +200,11 @@ pub(super) fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppSt
     );
 
     // Direction row
+    let direction_label_style = if active_field == AlertFormField::Direction {
+        active_label_style
+    } else {
+        label_style
+    };
     let (above_style, below_style) = if app.alert_form.direction_above {
         (
             Style::default()
@@ -169,7 +223,7 @@ pub(super) fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppSt
         )
     };
     let dir_line = Line::from(vec![
-        Span::raw("Direction: "),
+        Span::styled("Direction: ", direction_label_style),
         Span::styled("Above", above_style),
         Span::raw("  "),
         Span::styled("Below", below_style),
@@ -179,26 +233,114 @@ pub(super) fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppSt
         inner_layout[1],
     );
 
+    // Mode row
+    let mode_label_style = if active_field == AlertFormField::Mode {
+        active_label_style
+    } else {
+        label_style
+    };
+    let (once_style, repeat_style) = match app.alert_form.repeat {
+        AlertRepeat::Once => (
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Gray),
+        ),
+        AlertRepeat::Repeat => (
+            Style::default().fg(Color::Gray),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    let mode_line = Line::from(vec![
+        Span::styled("Mode: ", mode_label_style),
+        Span::styled("Once", once_style),
+        Span::raw("  "),
+        Span::styled("Repeat", repeat_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(mode_line).wrap(Wrap { trim: true }),
+        inner_layout[2],
+    );
+
     // Price row
     let price_value = if app.alert_form.price_input.is_empty() {
         " ".to_string()
     } else {
         app.alert_form.price_input.clone()
     };
+    let price_label_style = if active_field == AlertFormField::Price {
+        active_label_style
+    } else {
+        label_style
+    };
+    let price_value_style = if active_field == AlertFormField::Price {
+        active_value_style
+    } else {
+        value_style
+    };
     let price_line = Line::from(vec![
-        Span::styled("Price: ", Style::default().fg(Color::Cyan)),
-        Span::styled(
-            price_value,
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(Color::White),
-        ),
+        Span::styled("Price: ", price_label_style),
+        Span::styled(price_value, price_value_style),
         // Cursor indicator
         Span::styled(" ", Style::default().bg(Color::LightCyan)),
     ]);
     frame.render_widget(
         Paragraph::new(price_line).wrap(Wrap { trim: true }),
-        inner_layout[2],
+        inner_layout[4],
+    );
+
+    // Cooldown row
+    let cooldown_value = if app.alert_form.cooldown_input.is_empty() {
+        "-".to_string()
+    } else {
+        app.alert_form.cooldown_input.clone()
+    };
+    let cooldown_label_style = if active_field == AlertFormField::Cooldown {
+        active_label_style
+    } else {
+        label_style
+    };
+    let cooldown_value_style = if active_field == AlertFormField::Cooldown {
+        active_value_style
+    } else {
+        value_style
+    };
+    let cooldown_line = Line::from(vec![
+        Span::styled("Cooldown(s): ", cooldown_label_style),
+        Span::styled(cooldown_value, cooldown_value_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(cooldown_line).wrap(Wrap { trim: true }),
+        inner_layout[5],
+    );
+
+    // Hysteresis row
+    let hysteresis_value = if app.alert_form.hysteresis_input.is_empty() {
+        "-".to_string()
+    } else {
+        app.alert_form.hysteresis_input.clone()
+    };
+    let hysteresis_label_style = if active_field == AlertFormField::Hysteresis {
+        active_label_style
+    } else {
+        label_style
+    };
+    let hysteresis_value_style = if active_field == AlertFormField::Hysteresis {
+        active_value_style
+    } else {
+        value_style
+    };
+    let hysteresis_line = Line::from(vec![
+        Span::styled("Hysteresis: ", hysteresis_label_style),
+        Span::styled(hysteresis_value, hysteresis_value_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(hysteresis_line).wrap(Wrap { trim: true }),
+        inner_layout[6],
     );
 
     // Error/info row
@@ -206,19 +348,19 @@ pub(super) fn render_alert_popup(frame: &mut Frame<'_>, _area: Rect, app: &AppSt
         (err, Style::default().fg(Color::LightRed))
     } else {
         (
-            "Enter price, Tab to toggle Above/Below, Enter to save, Esc to cancel".to_string(),
+            "Up/Down switch fields, Tab toggles options, Enter to save, Esc to cancel".to_string(),
             Style::default().fg(Color::Gray),
         )
     };
     frame.render_widget(
         Paragraph::new(error_line).style(error_style),
-        inner_layout[3],
+        inner_layout[7],
     );
 
     // Hint row
     frame.render_widget(
-        Paragraph::new("Shortcuts: a = open, Tab/←/→ toggle direction, Enter = save, Esc = cancel")
+        Paragraph::new("Hint: hysteresis supports % (e.g. 0.2%), cooldown in seconds")
             .style(Style::default().fg(Color::Gray)),
-        inner_layout[4],
+        inner_layout[8],
     );
 }

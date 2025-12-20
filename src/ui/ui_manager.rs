@@ -343,6 +343,23 @@ impl UIManager {
                             self.render_state.should_quit = true;
                             let _ = self.session_event_tx.send(SessionEvent::ShutdownRequested);
                         }
+                        UiAction::SubmitAlert {
+                            symbol,
+                            direction,
+                            price,
+                            options,
+                        } => {
+                            if let Err(e) = self.session_event_tx.send(SessionEvent::AlertAdd {
+                                symbol,
+                                direction,
+                                price,
+                                options,
+                            }) {
+                                let message = format!("Failed to add alert from UI: {}", e);
+                                self.render_state.error_message = Some(message.clone());
+                                self.app_state.push_log(message);
+                            }
+                        }
                         UiAction::SubmitCommand(cmd) => {
                             if let Err(e) = self.process_user_command(&cmd) {
                                 let message = format!("Command error: {}", e);

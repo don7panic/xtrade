@@ -15,7 +15,7 @@ use crate::notify::SystemNotifier;
 use crate::ui::ui_manager::UIManager;
 
 use super::action_channel::{ActionChannel, SessionEvent};
-use super::alert_manager::{AlertDirection, AlertManager, AlertTrigger};
+use super::alert_manager::{AlertDirection, AlertManager, AlertOptions, AlertRepeat, AlertTrigger};
 use super::command_router::{AlertAction, ClearTarget, CommandRouter, InteractiveCommand};
 
 /// Session state tracking
@@ -741,6 +741,14 @@ impl SessionManager {
                 self.stats.errors_encountered += 1;
                 self.forward_to_ui(SessionEvent::Error { message });
             }
+            SessionEvent::AlertAdd {
+                symbol,
+                direction,
+                price,
+                options,
+            } => {
+                self.add_alert_from_ui(symbol, direction, price, options)?;
+            }
             SessionEvent::UserCommand { command } => {
                 self.handle_command(command).await?;
             }
@@ -758,25 +766,6 @@ impl SessionManager {
     /// Handle alert command
     async fn handle_alert(&mut self, action: AlertAction) -> Result<()> {
         match action {
-            AlertAction::Add {
-                symbol,
-                direction,
-                price,
-            } => match self.alert_manager.add_alert(symbol, direction, price) {
-                Ok(alert) => {
-                    let message = format!(
-                        "Alert #{} added: {} {:?} {}",
-                        alert.id, alert.symbol, alert.direction, alert.threshold
-                    );
-                    self.emit_alert_notification(message);
-                    self.send_alert_snapshot();
-                }
-                Err(e) => {
-                    let message = format!("Failed to add alert: {}", e);
-                    self.action_channel
-                        .send_event(SessionEvent::Error { message })?;
-                }
-            },
             AlertAction::List => {
                 let alerts = self.alert_manager.list_alerts();
                 let mut entries = Vec::new();
@@ -789,9 +778,36 @@ impl SessionManager {
                         } else {
                             "armed"
                         };
+                        let mode = match alert.repeat {
+                            AlertRepeat::Once => "once".to_string(),
+                            AlertRepeat::Repeat => {
+                                if alert.cooldown_ms > 0 {
+                                    format!("repeat/{}s", alert.cooldown_ms / 1_000)
+                                } else {
+                                    "repeat".to_string()
+                                }
+                            }
+                        };
+                        let cooldown = if alert.cooldown_ms > 0 {
+                            format!("{}s", alert.cooldown_ms / 1_000)
+                        } else {
+                            "0".to_string()
+                        };
+                        let hysteresis = if alert.hysteresis > 0.0 {
+                            format!("{:.4}", alert.hysteresis)
+                        } else {
+                            "0".to_string()
+                        };
                         entries.push(format!(
-                            "#{} {} {:?} {} ({})",
-                            alert.id, alert.symbol, alert.direction, alert.threshold, status
+                            "#{} {} {:?} {} ({}, mode={}, cooldown={}, hysteresis={})",
+                            alert.id,
+                            alert.symbol,
+                            alert.direction,
+                            alert.threshold,
+                            status,
+                            mode,
+                            cooldown,
+                            hysteresis
                         ));
                     }
                 }
@@ -833,6 +849,61 @@ impl SessionManager {
         Ok(())
     }
 
+    fn add_alert_from_ui(
+        &mut self,
+        symbol: String,
+        direction: AlertDirection,
+        price: f64,
+        options: AlertOptions,
+    ) -> Result<()> {
+        match self
+            .alert_manager
+            .add_alert_with_options(symbol, direction, price, options)
+        {
+            Ok(alert) => {
+                let mode = match alert.repeat {
+                    AlertRepeat::Once => "once".to_string(),
+                    AlertRepeat::Repeat => {
+                        if alert.cooldown_ms > 0 {
+                            format!("repeat/{}s", alert.cooldown_ms / 1_000)
+                        } else {
+                            "repeat".to_string()
+                        }
+                    }
+                };
+                let cooldown = if alert.cooldown_ms > 0 {
+                    format!("{}s", alert.cooldown_ms / 1_000)
+                } else {
+                    "0".to_string()
+                };
+                let hysteresis = if alert.hysteresis > 0.0 {
+                    format!("{:.4}", alert.hysteresis)
+                } else {
+                    "0".to_string()
+                };
+                let message = format!(
+                    "Alert #{} added: {} {:?} {} (mode={}, cooldown={}, hysteresis={})",
+                    alert.id,
+                    alert.symbol,
+                    alert.direction,
+                    alert.threshold,
+                    mode,
+                    cooldown,
+                    hysteresis
+                );
+                self.emit_alert_notification(message);
+                self.send_alert_snapshot();
+            }
+            Err(e) => {
+                let message = format!("Failed to add alert: {}", e);
+                self.action_channel
+                    .send_event(SessionEvent::Error { message })?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Forward an event to the UI if the channel is available
     fn forward_to_ui(&self, event: SessionEvent) {
         if let Some(ui_event_tx) = &self.ui_event_tx {
@@ -858,12 +929,12 @@ impl SessionManager {
     /// Emit a system-level notification for a triggered price alert (fire-and-forget)
     fn send_price_trigger_notification(&self, trigger: &AlertTrigger) {
         let direction = match trigger.direction {
-            AlertDirection::Above => ">=",
-            AlertDirection::Below => "<=",
+            AlertDirection::Above => "above",
+            AlertDirection::Below => "below",
         };
         let title = format!("{} price alert", trigger.symbol);
         let body = format!(
-            "Price {} {:.6} (last {})",
+            "Price {} {:.4} (last {})",
             direction, trigger.threshold, trigger.price
         );
         self.system_notifier.notify(title, body);

@@ -156,25 +156,14 @@ fn draw_candlesticks(
             std::mem::swap(&mut y_open, &mut y_close);
         }
 
-        let x_right = x.saturating_add(1);
-
         if y_open == y_close {
             if within(area, x, y_open) {
                 buffer.get_mut(x, y_open).set_style(style).set_symbol("─");
-            }
-            if within(area, x_right, y_open) {
-                buffer
-                    .get_mut(x_right, y_open)
-                    .set_style(style)
-                    .set_symbol("─");
             }
         } else {
             for y in y_open..=y_close {
                 if within(area, x, y) {
                     buffer.get_mut(x, y).set_style(style).set_symbol("█");
-                }
-                if within(area, x_right, y) {
-                    buffer.get_mut(x_right, y).set_style(style).set_symbol("█");
                 }
             }
         }

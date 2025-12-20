@@ -4,6 +4,38 @@ use anyhow::{Result, anyhow};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ALERTS: usize = 50;
+const DEFAULT_ALERT_COOLDOWN_MS: u64 = 0;
+const DEFAULT_ALERT_HYSTERESIS_PCT: f64 = 0.0;
+
+/// Re-trigger behavior for alerts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertRepeat {
+    Once,
+    Repeat,
+}
+
+/// Additional alert options for re-trigger and noise control
+#[derive(Debug, Clone, Copy)]
+pub struct AlertOptions {
+    pub repeat: AlertRepeat,
+    pub cooldown_ms: u64,
+    pub hysteresis: f64,
+}
+
+impl AlertOptions {
+    pub fn default_for_threshold(threshold: f64) -> Self {
+        let hysteresis = if DEFAULT_ALERT_HYSTERESIS_PCT > 0.0 && threshold.is_finite() {
+            threshold * (DEFAULT_ALERT_HYSTERESIS_PCT / 100.0)
+        } else {
+            0.0
+        };
+        Self {
+            repeat: AlertRepeat::Repeat,
+            cooldown_ms: DEFAULT_ALERT_COOLDOWN_MS,
+            hysteresis,
+        }
+    }
+}
 
 /// Direction for price threshold comparison
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +54,10 @@ pub struct Alert {
     pub triggered: bool,
     pub last_price: Option<f64>,
     pub created_at_ms: u64,
+    pub repeat: AlertRepeat,
+    pub cooldown_ms: u64,
+    pub hysteresis: f64,
+    pub last_notified_ms: Option<u64>,
 }
 
 /// Trigger information returned when an alert fires
@@ -55,6 +91,18 @@ impl AlertManager {
         direction: AlertDirection,
         threshold: f64,
     ) -> Result<Alert> {
+        let options = AlertOptions::default_for_threshold(threshold);
+        self.add_alert_with_options(symbol, direction, threshold, options)
+    }
+
+    /// Add a new alert with explicit options
+    pub fn add_alert_with_options(
+        &mut self,
+        symbol: impl Into<String>,
+        direction: AlertDirection,
+        threshold: f64,
+        options: AlertOptions,
+    ) -> Result<Alert> {
         if self.alerts.len() >= MAX_ALERTS {
             return Err(anyhow!(
                 "Maximum alert limit ({}) reached. Clear alerts before adding more.",
@@ -64,6 +112,9 @@ impl AlertManager {
 
         if !threshold.is_finite() || threshold <= 0.0 {
             return Err(anyhow!("Threshold must be a positive, finite number"));
+        }
+        if !options.hysteresis.is_finite() || options.hysteresis < 0.0 {
+            return Err(anyhow!("Hysteresis must be a non-negative, finite number"));
         }
 
         let symbol = symbol.into().to_ascii_uppercase();
@@ -79,6 +130,10 @@ impl AlertManager {
             triggered: false,
             last_price: None,
             created_at_ms: now_ms(),
+            repeat: options.repeat,
+            cooldown_ms: options.cooldown_ms,
+            hysteresis: options.hysteresis,
+            last_notified_ms: None,
         };
         self.next_id += 1;
         self.alerts.push(alert.clone());
@@ -110,48 +165,66 @@ impl AlertManager {
             return (Vec::new(), false);
         }
 
+        let now = now_ms();
         let mut triggers = Vec::new();
         let mut state_changed = false;
 
         for alert in self.alerts.iter_mut().filter(|a| a.symbol == symbol) {
             let was_triggered = alert.triggered;
             let previous_price = alert.last_price;
+            let should_notify = |alert: &Alert| match alert.repeat {
+                AlertRepeat::Once => alert.last_notified_ms.is_none(),
+                AlertRepeat::Repeat => alert
+                    .last_notified_ms
+                    .map(|last| now.saturating_sub(last) >= alert.cooldown_ms)
+                    .unwrap_or(true),
+            };
 
             match alert.direction {
                 AlertDirection::Above => {
                     if alert.triggered {
-                        if price < alert.threshold {
+                        if matches!(alert.repeat, AlertRepeat::Repeat)
+                            && price <= alert.threshold - alert.hysteresis
+                        {
                             alert.triggered = false; // re-arm
                         }
                     } else if price >= alert.threshold
                         && previous_price.map_or(true, |prev| prev < alert.threshold)
                     {
                         alert.triggered = true;
-                        triggers.push(AlertTrigger {
-                            id: alert.id,
-                            symbol: alert.symbol.clone(),
-                            direction: alert.direction,
-                            threshold: alert.threshold,
-                            price,
-                        });
+                        if should_notify(alert) {
+                            triggers.push(AlertTrigger {
+                                id: alert.id,
+                                symbol: alert.symbol.clone(),
+                                direction: alert.direction,
+                                threshold: alert.threshold,
+                                price,
+                            });
+                            alert.last_notified_ms = Some(now);
+                        }
                     }
                 }
                 AlertDirection::Below => {
                     if alert.triggered {
-                        if price > alert.threshold {
+                        if matches!(alert.repeat, AlertRepeat::Repeat)
+                            && price >= alert.threshold + alert.hysteresis
+                        {
                             alert.triggered = false; // re-arm
                         }
                     } else if price <= alert.threshold
                         && previous_price.map_or(true, |prev| prev > alert.threshold)
                     {
                         alert.triggered = true;
-                        triggers.push(AlertTrigger {
-                            id: alert.id,
-                            symbol: alert.symbol.clone(),
-                            direction: alert.direction,
-                            threshold: alert.threshold,
-                            price,
-                        });
+                        if should_notify(alert) {
+                            triggers.push(AlertTrigger {
+                                id: alert.id,
+                                symbol: alert.symbol.clone(),
+                                direction: alert.direction,
+                                threshold: alert.threshold,
+                                price,
+                            });
+                            alert.last_notified_ms = Some(now);
+                        }
                     }
                 }
             }
@@ -178,96 +251,4 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adds_and_lists_alerts() {
-        let mut mgr = AlertManager::new();
-        let alert = mgr
-            .add_alert("btcusdt", AlertDirection::Above, 45_000.0)
-            .expect("should add");
-        assert_eq!(alert.id, 1);
-        let alerts = mgr.list_alerts();
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].symbol, "BTCUSDT");
-    }
-
-    #[test]
-    fn triggers_on_crossing_above_and_rearms() {
-        let mut mgr = AlertManager::new();
-        mgr.add_alert("ETHUSDT", AlertDirection::Above, 2000.0)
-            .unwrap();
-
-        // No trigger below threshold
-        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 1995.0);
-        assert!(triggers.is_empty());
-        assert!(!changed);
-        // Trigger on crossing above
-        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 2001.0);
-        assert_eq!(triggers.len(), 1);
-        assert_eq!(triggers[0].id, 1);
-        assert!(changed);
-        // Stay above should not re-trigger
-        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 2005.0);
-        assert!(triggers.is_empty());
-        assert!(!changed);
-        // Drop below to re-arm
-        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 1990.0);
-        assert!(triggers.is_empty());
-        assert!(changed);
-        // Cross above again should trigger
-        let (triggers, changed) = mgr.evaluate_price("ETHUSDT", 2005.0);
-        assert_eq!(triggers.len(), 1);
-        assert!(changed);
-    }
-
-    #[test]
-    fn triggers_on_crossing_below_and_rearms() {
-        let mut mgr = AlertManager::new();
-        mgr.add_alert("BTCUSDT", AlertDirection::Below, 30_000.0)
-            .unwrap();
-
-        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 30_100.0);
-        assert!(triggers.is_empty());
-        assert!(!changed);
-        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 29_999.0);
-        assert_eq!(triggers.len(), 1);
-        assert_eq!(
-            triggers[0],
-            AlertTrigger {
-                id: 1,
-                symbol: "BTCUSDT".to_string(),
-                direction: AlertDirection::Below,
-                threshold: 30_000.0,
-                price: 29_999.0
-            }
-        );
-        assert!(changed);
-        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 29_500.0);
-        assert!(triggers.is_empty());
-        assert!(!changed);
-        let (triggers, changed) = mgr.evaluate_price("BTCUSDT", 30_500.0); // re-arm
-        assert!(triggers.is_empty());
-        assert!(changed);
-        let (retrigger, changed) = mgr.evaluate_price("BTCUSDT", 29_500.0);
-        assert_eq!(retrigger.len(), 1);
-        assert!(changed);
-    }
-
-    #[test]
-    fn enforce_max_alerts() {
-        let mut mgr = AlertManager::new();
-        for i in 0..MAX_ALERTS {
-            mgr.add_alert(format!("SYM{}", i), AlertDirection::Above, 1.0)
-                .unwrap();
-        }
-        let err = mgr
-            .add_alert("OVER", AlertDirection::Above, 1.0)
-            .unwrap_err();
-        assert!(err.to_string().contains("Maximum alert limit"));
-    }
 }

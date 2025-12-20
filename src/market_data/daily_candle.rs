@@ -1,7 +1,7 @@
 //! Daily candle data structure and helpers
 
 /// Default number of daily candles to retain per symbol
-pub const DEFAULT_DAILY_CANDLE_LIMIT: usize = 90;
+pub const DEFAULT_DAILY_CANDLE_LIMIT: usize = 30;
 
 /// Simplified daily candle representation shared across the app
 #[derive(Debug, Clone, PartialEq)]
