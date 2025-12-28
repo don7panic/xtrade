@@ -18,12 +18,12 @@ pub(super) fn render_price_trend(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
         return;
     }
 
-    let Some(symbol) = app.current_symbol().cloned() else {
+    let Some(key) = app.current_market_key().cloned() else {
         render_price_trend_placeholder(frame, inner);
         return;
     };
 
-    let Some(data) = app.market_data.get_mut(&symbol) else {
+    let Some(data) = app.market_data.get_mut(&key) else {
         render_price_trend_placeholder(frame, inner);
         return;
     };

@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::rest::BinanceRestClient;
+use crate::binance::BinanceRestClient;
 
 /// Connection status for WebSocket
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +29,56 @@ pub struct Symbol {
     pub symbol: String,
     pub base_asset: String,
     pub quote_asset: String,
+}
+
+/// Market type definition
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketType {
+    #[default]
+    Spot,
+    PerpUsdt,
+}
+
+impl std::fmt::Display for MarketType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MarketType::Spot => write!(f, "spot"),
+            MarketType::PerpUsdt => write!(f, "perp_usdt"),
+        }
+    }
+}
+
+/// Unique identifier for a market subscription
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MarketKey {
+    pub market_type: MarketType,
+    pub symbol: String,
+}
+
+impl MarketKey {
+    pub fn new(market_type: MarketType, symbol: String) -> Self {
+        Self {
+            market_type,
+            symbol,
+        }
+    }
+}
+
+impl std::fmt::Display for MarketKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.market_type, self.symbol)
+    }
+}
+
+/// Contract specification for UI display and calculations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractSpec {
+    pub symbol: String,
+    pub price_precision: u32,
+    pub quantity_precision: u32,
+    pub contract_size: f64,
+    pub margin_asset: String,
 }
 
 /// OrderBook structure for managing bid/ask data
@@ -146,29 +196,47 @@ impl OrderBook {
         }
 
         // Sequence number validation according to Binance documentation:
-        // 1. Drop any event where first_update_id <= lastUpdateId in the snapshot
-        if update.first_update_id <= self.last_update_id {
+        // 1. Drop any event where final_update_id <= lastUpdateId in the snapshot
+        if update.final_update_id <= self.last_update_id {
             debug!(
-                "Discarding stale update: first_update_id {} <= last_update_id {}",
-                update.first_update_id, self.last_update_id
+                "Discarding stale update: final_update_id {} <= last_update_id {}",
+                update.final_update_id, self.last_update_id
             );
             return Err(OrderBookError::StaleMessage {
-                update_id: update.first_update_id,
+                update_id: update.final_update_id,
                 snapshot_id: self.last_update_id,
             });
         }
 
-        // 2. The first processed event should have first_update_id <= lastUpdateId+1 AND final_update_id >= lastUpdateId+1
-        if self.last_update_id > 0 && update.first_update_id > self.last_update_id + 1 {
-            warn!(
-                "Sequence gap detected: expected first_update_id <= {}, got {}",
-                self.last_update_id + 1,
-                update.first_update_id
-            );
-            return Err(OrderBookError::SequenceValidationFailed {
-                expected: self.last_update_id + 1,
-                actual: update.first_update_id,
-            });
+        // 2. Sequence validation
+        // Spot: first_update_id should be <= last_update_id + 1
+        // Perp: prev_final_update_id should be == last_update_id (if U > last_update_id)
+        if self.last_update_id > 0 {
+            let is_gap = if let Some(pu) = update.prev_final_update_id {
+                // Perp Logic
+                // If U <= last_update_id, it's an overlap (valid).
+                // If U > last_update_id, we check the chain via pu.
+                if update.first_update_id <= self.last_update_id {
+                    false // Overlap is fine
+                } else {
+                    pu != self.last_update_id // Gap if chain is broken
+                }
+            } else {
+                // Spot Logic (Legacy)
+                // The first processed event should have U <= last_update_id + 1
+                update.first_update_id > self.last_update_id + 1
+            };
+
+            if is_gap {
+                warn!(
+                    "Sequence gap detected: expected continuity from {}, got update U={}, pu={:?}",
+                    self.last_update_id, update.first_update_id, update.prev_final_update_id
+                );
+                return Err(OrderBookError::SequenceValidationFailed {
+                    expected: self.last_update_id + 1, // Approximation for error message
+                    actual: update.first_update_id,
+                });
+            }
         }
 
         debug!(
@@ -389,6 +457,8 @@ pub struct OrderBookUpdate {
     pub first_update_id: u64,
     #[serde(rename = "u")]
     pub final_update_id: u64,
+    #[serde(rename = "pu", default)]
+    pub prev_final_update_id: Option<u64>,
     #[serde(rename = "b")]
     pub bids: Vec<[String; 2]>,
     #[serde(rename = "a")]
@@ -631,6 +701,106 @@ pub enum BinanceEventType {
     Kline,
     #[serde(rename = "aggTrade")]
     AggregatedTrade,
+    #[serde(rename = "markPriceUpdate")]
+    MarkPriceUpdate,
+    #[serde(rename = "fundingRate")]
+    FundingRate, // this might come as markPriceUpdate or a specific event? "markPriceUpdate" contains funding usually.
+    // Actually markPrice stream payload has "e": "markPriceUpdate".
+    // There is no specific "fundingRate" event type in the payload usually, it's just a value in markPriceUpdate or a REST fetch.
+    // BUT the plan mentions @fundingRate stream.
+    // Checking Binance docs: @fundingRate stream payload:
+    // { "e": "fundingRate", "s": "BTCUSDT", "p": "0.01000000", ... }
+    #[serde(rename = "openInterest")]
+    OpenInterest, // stream payload may omit event type in futures API
+    // @openInterest stream payload does NOT have "e". It is just { "openInterest": "...", "symbol": "...", "time": ... }
+    // Wait, actually let's check standard payloads.
+    // For now let's add them as variants.
+    #[serde(rename = "forceOrder")]
+    ForceOrder, // Liquidation
+}
+
+/// Mark Price Update message
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MarkPriceUpdate {
+    #[serde(rename = "e")]
+    pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: u64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "p")]
+    pub mark_price: String,
+    #[serde(rename = "i")]
+    pub index_price: String,
+    #[serde(rename = "P")]
+    pub estimated_settle_price: String,
+    #[serde(rename = "r")]
+    pub funding_rate: String,
+    #[serde(rename = "T")]
+    pub next_funding_time: u64,
+}
+
+/// Funding Rate Update message
+#[derive(Debug, Deserialize, Serialize)]
+pub struct FundingRateUpdate {
+    #[serde(rename = "e")]
+    pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: u64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "r")]
+    pub funding_rate: String,
+    #[serde(rename = "T")]
+    pub funding_time: u64,
+}
+
+/// Liquidation Order (Force Order) message
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ForceOrder {
+    #[serde(rename = "e")]
+    pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: u64,
+    #[serde(rename = "o")]
+    pub order: ForceOrderData,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ForceOrderData {
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "S")]
+    pub side: String, // SELL or BUY
+    #[serde(rename = "o")]
+    pub order_type: String, // LIMIT, etc.
+    #[serde(rename = "f")]
+    pub time_in_force: String, // IOC
+    #[serde(rename = "q")]
+    pub original_quantity: String,
+    #[serde(rename = "p")]
+    pub price: String,
+    #[serde(rename = "ap")]
+    pub average_price: String,
+    #[serde(rename = "X")]
+    pub order_status: String, // FILLED
+    #[serde(rename = "l")]
+    pub last_filled_quantity: String,
+    #[serde(rename = "z")]
+    pub accumulated_filled_quantity: String,
+    #[serde(rename = "T")]
+    pub trade_time: u64,
+}
+
+/// Open Interest Update message
+#[derive(Debug, Deserialize, Serialize)]
+pub struct OpenInterestStream {
+    #[serde(rename = "openInterest")]
+    pub open_interest: String,
+    #[serde(rename = "symbol")]
+    pub symbol: String,
+    #[serde(rename = "time")]
+    pub time: u64,
 }
 
 // Additional types will be added in subsequent days

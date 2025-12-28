@@ -17,8 +17,9 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn};
 
 use super::types::{
-    BinanceEventType, BinanceMessage, ConnectionStatus, KlineStreamEvent, OrderBookUpdate,
-    SubscribeRequest, Ticker24hr, TradeMessage, UnsubscribeRequest, WebSocketError,
+    BinanceEventType, BinanceMessage, ConnectionStatus, ForceOrder, FundingRateUpdate,
+    KlineStreamEvent, MarkPriceUpdate, OpenInterestStream, OrderBookUpdate, SubscribeRequest,
+    Ticker24hr, TradeMessage, UnsubscribeRequest, WebSocketError,
 };
 
 /// Binance WebSocket client
@@ -192,6 +193,39 @@ impl BinanceWebSocket {
         Ok(())
     }
 
+    /// Subscribe to mark price stream (Perp only)
+    pub async fn subscribe_mark_price(&self, symbol: &str, fast_update: bool) -> Result<()> {
+        let stream_type = if fast_update {
+            "markPrice@1s"
+        } else {
+            "markPrice"
+        };
+        self.subscribe(symbol, stream_type).await?;
+        info!("Subscribed to mark price stream for {}", symbol);
+        Ok(())
+    }
+
+    /// Subscribe to liquidation order stream (Perp only)
+    pub async fn subscribe_force_order(&self, symbol: &str) -> Result<()> {
+        self.subscribe(symbol, "forceOrder").await?;
+        info!("Subscribed to force order stream for {}", symbol);
+        Ok(())
+    }
+
+    /// Subscribe to open interest stream (Perp only)
+    pub async fn subscribe_open_interest(&self, symbol: &str) -> Result<()> {
+        self.subscribe(symbol, "openInterest").await?;
+        info!("Subscribed to open interest stream for {}", symbol);
+        Ok(())
+    }
+
+    /// Subscribe to funding rate stream (Perp only)
+    pub async fn subscribe_funding_rate(&self, symbol: &str) -> Result<()> {
+        self.subscribe(symbol, "fundingRate").await?;
+        info!("Subscribed to funding rate stream for {}", symbol);
+        Ok(())
+    }
+
     /// Send a message through the WebSocket
     async fn send_message(&self, message: Message) -> Result<()> {
         let mut connection = self.connection.lock().await;
@@ -360,7 +394,18 @@ impl BinanceWebSocket {
                 "24hrTicker" => Some(BinanceEventType::Ticker24hr),
                 "kline" => Some(BinanceEventType::Kline),
                 "aggTrade" => Some(BinanceEventType::AggregatedTrade),
+                "markPriceUpdate" => Some(BinanceEventType::MarkPriceUpdate),
+                "fundingRate" => Some(BinanceEventType::FundingRate),
+                "forceOrder" => Some(BinanceEventType::ForceOrder),
+                "openInterest" => Some(BinanceEventType::OpenInterest),
                 _ => None,
+            })
+            .or_else(|| {
+                if value.get("openInterest").is_some() && value.get("symbol").is_some() {
+                    Some(BinanceEventType::OpenInterest)
+                } else {
+                    None
+                }
             })
     }
 
@@ -468,11 +513,69 @@ impl BinanceWebSocket {
                         Ok(BinanceMessage { stream, data })
                     }
                     Some(BinanceEventType::AggregatedTrade) => {
-                        // Aggregated trade messages are not yet fully supported
                         debug!("Received aggregated trade message (not fully supported)");
                         Ok(BinanceMessage {
                             stream: "aggTrade".to_string(),
                             data: value,
+                        })
+                    }
+                    Some(BinanceEventType::MarkPriceUpdate) => {
+                        let update: MarkPriceUpdate =
+                            serde_json::from_value(value).map_err(|e| {
+                                WebSocketError::ParseError(format!(
+                                    "Failed to parse mark price update: {}",
+                                    e
+                                ))
+                            })?;
+
+                        Ok(BinanceMessage {
+                            stream: format!("{}@markPrice", update.symbol.to_lowercase()),
+                            data: serde_json::json!(update),
+                        })
+                    }
+                    Some(BinanceEventType::ForceOrder) => {
+                        let force_order: ForceOrder =
+                            serde_json::from_value(value).map_err(|e| {
+                                WebSocketError::ParseError(format!(
+                                    "Failed to parse force order: {}",
+                                    e
+                                ))
+                            })?;
+
+                        Ok(BinanceMessage {
+                            stream: format!(
+                                "{}@forceOrder",
+                                force_order.order.symbol.to_lowercase()
+                            ),
+                            data: serde_json::json!(force_order),
+                        })
+                    }
+                    Some(BinanceEventType::FundingRate) => {
+                        let update: FundingRateUpdate =
+                            serde_json::from_value(value).map_err(|e| {
+                                WebSocketError::ParseError(format!(
+                                    "Failed to parse funding rate update: {}",
+                                    e
+                                ))
+                            })?;
+
+                        Ok(BinanceMessage {
+                            stream: format!("{}@fundingRate", update.symbol.to_lowercase()),
+                            data: serde_json::json!(update),
+                        })
+                    }
+                    Some(BinanceEventType::OpenInterest) => {
+                        let update: OpenInterestStream =
+                            serde_json::from_value(value).map_err(|e| {
+                                WebSocketError::ParseError(format!(
+                                    "Failed to parse open interest update: {}",
+                                    e
+                                ))
+                            })?;
+
+                        Ok(BinanceMessage {
+                            stream: format!("{}@openInterest", update.symbol.to_lowercase()),
+                            data: serde_json::json!(update),
                         })
                     }
                     None => {

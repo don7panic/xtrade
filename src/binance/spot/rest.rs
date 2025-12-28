@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde::de::{Error as DeError, IgnoredAny};
 use tracing::{debug, info, warn};
 
-use super::types::{DepthSnapshot, Symbol, Ticker24hr};
+use crate::binance::types::{DepthSnapshot, Symbol, Ticker24hr};
 use crate::market_data::DailyCandle;
 
 /// Binance REST API client

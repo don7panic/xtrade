@@ -33,11 +33,15 @@ pub struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Start interactive terminal session
-    #[command(hide = true)]
-    Interactive {
+    #[command(name = "ui")]
+    Ui {
         /// Use simple CLI output instead of full TUI
         #[arg(long)]
         simple: bool,
+
+        /// Market type (spot, perp)
+        #[arg(long, default_value = "spot")]
+        market: String,
     },
 
     /// Configuration management
@@ -52,7 +56,10 @@ pub enum Commands {
 
 impl Default for Commands {
     fn default() -> Self {
-        Commands::Interactive { simple: false }
+        Commands::Ui {
+            simple: false,
+            market: "spot".to_string(),
+        }
     }
 }
 
@@ -86,7 +93,7 @@ impl Cli {
 
     /// Check if we're running in interactive mode
     pub fn is_interactive_mode(&self) -> bool {
-        matches!(self.command(), Commands::Interactive { .. })
+        matches!(self.command(), Commands::Ui { .. })
     }
 
     /// Adjust log level based on verbose flag

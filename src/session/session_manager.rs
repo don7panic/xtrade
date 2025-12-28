@@ -2,19 +2,21 @@
 
 use anyhow::Result;
 use futures_util::{StreamExt, stream::FuturesUnordered};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tracing::{debug, error, info, warn};
 
+use crate::binance::types::{MarketKey, MarketType};
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::market_data::MarketDataManager;
+use crate::market_data::{MarketDataManager, MarketStream};
 use crate::metrics::{ConnectionStatus as MetricsConnectionStatus, MetricsCollector};
 use crate::notify::SystemNotifier;
 use crate::ui::ui_manager::UIManager;
 
-use super::action_channel::{ActionChannel, SessionEvent};
+use super::action_channel::{ActionChannel, SessionEvent, StatusInfo};
 use super::alert_manager::{AlertDirection, AlertManager, AlertOptions, AlertRepeat, AlertTrigger};
 use super::command_router::{AlertAction, ClearTarget, CommandRouter, InteractiveCommand};
 
@@ -40,9 +42,9 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            enable_tui: true,
-            enable_metrics: true,
-            auto_subscribe: true,
+            enable_tui: true,            // Default to TUI mode
+            enable_metrics: true,        // Default to metrics collection
+            auto_subscribe: true,        // Default to auto-subscribe
             session_timeout_ms: 3600000, // 1 hour default timeout
         }
     }
@@ -74,6 +76,12 @@ impl Default for SessionStats {
 }
 
 const AUTO_SUBSCRIBE_MAX_CONCURRENCY: usize = 4;
+
+#[derive(Debug, Clone)]
+struct SubscriptionPlan {
+    key: MarketKey,
+    streams: HashSet<MarketStream>,
+}
 
 /// Main session manager for interactive terminal
 pub struct SessionManager {
@@ -124,7 +132,7 @@ impl SessionManager {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         // Create market data manager
-        let market_manager = Arc::new(MarketDataManager::new());
+        let market_manager = Arc::new(MarketDataManager::new(app_config.binance.clone()));
 
         // Create command router
         let command_router = CommandRouter::new();
@@ -170,6 +178,17 @@ impl SessionManager {
         })
     }
 
+    /// Determine market type from CLI args
+    fn get_market_type(&self) -> MarketType {
+        match &self.cli.command {
+            Some(crate::cli::Commands::Ui { market, .. }) => match market.to_lowercase().as_str() {
+                "perp" | "perp_usdt" | "perp-usdt" => MarketType::PerpUsdt,
+                _ => MarketType::Spot,
+            },
+            _ => MarketType::Spot,
+        }
+    }
+
     /// Initialize the session
     pub async fn initialize(&mut self) -> Result<()> {
         info!("Initializing interactive session");
@@ -185,7 +204,7 @@ impl SessionManager {
         }
 
         // Auto-subscribe to symbols if configured
-        if self.config.auto_subscribe && !self.app_config.symbols.is_empty() {
+        if self.config.auto_subscribe {
             self.spawn_auto_subscribe_symbols();
         }
 
@@ -253,6 +272,7 @@ impl SessionManager {
             self.market_manager.clone(),
             self.action_channel.event_tx(),
             self.app_config.clone(),
+            self.get_market_type(),
         );
 
         // Get UI event sender for forwarding events
@@ -282,26 +302,121 @@ impl SessionManager {
         Ok(())
     }
 
+    fn build_subscription_plan(&self) -> Vec<SubscriptionPlan> {
+        let mut plan_map: HashMap<MarketKey, HashSet<MarketStream>> = HashMap::new();
+
+        for market in &self.app_config.markets {
+            if !market.exchange.eq_ignore_ascii_case("binance") {
+                warn!(
+                    "Skipping unsupported exchange '{}' in markets config",
+                    market.exchange
+                );
+                continue;
+            }
+
+            let streams = Self::resolve_streams(market.market_type, &market.streams);
+
+            for symbol in &market.symbols {
+                let key = MarketKey {
+                    market_type: market.market_type,
+                    symbol: symbol.clone(),
+                };
+                Self::merge_streams(&mut plan_map, key, streams.clone());
+            }
+        }
+
+        if !self.app_config.symbols.is_empty() {
+            let market_type = self.get_market_type();
+            let streams = MarketStream::default_streams_for_market(market_type);
+
+            for symbol in &self.app_config.symbols {
+                let key = MarketKey {
+                    market_type,
+                    symbol: symbol.clone(),
+                };
+                plan_map.entry(key).or_insert_with(|| streams.clone());
+            }
+        }
+
+        plan_map
+            .into_iter()
+            .map(|(key, streams)| SubscriptionPlan { key, streams })
+            .collect()
+    }
+
+    fn merge_streams(
+        plan_map: &mut HashMap<MarketKey, HashSet<MarketStream>>,
+        key: MarketKey,
+        streams: HashSet<MarketStream>,
+    ) {
+        plan_map
+            .entry(key)
+            .and_modify(|existing| {
+                existing.extend(streams.iter().copied());
+            })
+            .or_insert(streams);
+    }
+
+    fn resolve_streams(market_type: MarketType, streams: &[String]) -> HashSet<MarketStream> {
+        if streams.is_empty() {
+            return MarketStream::default_streams_for_market(market_type);
+        }
+
+        let mut resolved = HashSet::new();
+        let mut unknown = Vec::new();
+
+        for stream in streams {
+            if let Ok(parsed) = stream.parse::<MarketStream>() {
+                let perp_only = matches!(
+                    parsed,
+                    MarketStream::MarkPrice
+                        | MarketStream::FundingRate
+                        | MarketStream::OpenInterest
+                        | MarketStream::ForceOrder
+                );
+
+                if market_type == MarketType::Spot && perp_only {
+                    warn!("Ignoring perp-only stream '{}' for spot market", stream);
+                    continue;
+                }
+
+                resolved.insert(parsed);
+            } else if !stream.trim().is_empty() {
+                unknown.push(stream.clone());
+            }
+        }
+
+        if !unknown.is_empty() {
+            warn!("Unknown stream names in config: {:?}", unknown);
+        }
+
+        if resolved.is_empty() {
+            MarketStream::default_streams_for_market(market_type)
+        } else {
+            resolved
+        }
+    }
+
     /// Spawn background task to auto-subscribe to configured symbols with controlled parallelism
     fn spawn_auto_subscribe_symbols(&self) {
-        let symbols = self.app_config.symbols.clone();
-        let market_manager = self.market_manager.clone();
-        let action_channel = self.action_channel.clone();
-        let ui_event_tx = self.ui_event_tx.clone();
-        let enable_tui = self.config.enable_tui;
-
-        if symbols.is_empty() {
+        let subscriptions = self.build_subscription_plan();
+        if subscriptions.is_empty() {
             return;
         }
 
         info!(
             "Scheduling background auto-subscribe for {} symbols",
-            symbols.len()
+            subscriptions.len()
         );
+
+        let market_manager = self.market_manager.clone();
+        let action_channel = self.action_channel.clone();
+        let ui_event_tx = self.ui_event_tx.clone();
+        let enable_tui = self.config.enable_tui;
 
         tokio::spawn(async move {
             Self::run_auto_subscribe_workflow(
-                symbols,
+                subscriptions,
                 market_manager,
                 action_channel,
                 ui_event_tx,
@@ -312,13 +427,13 @@ impl SessionManager {
     }
 
     async fn run_auto_subscribe_workflow(
-        symbols: Vec<String>,
+        subscriptions: Vec<SubscriptionPlan>,
         market_manager: Arc<MarketDataManager>,
         action_channel: ActionChannel,
         ui_event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
         enable_tui: bool,
     ) {
-        let symbol_count = symbols.len();
+        let symbol_count = subscriptions.len();
         if symbol_count == 0 {
             return;
         }
@@ -334,10 +449,13 @@ impl SessionManager {
 
         let mut tasks = FuturesUnordered::new();
 
-        for symbol in symbols {
+        for subscription in subscriptions {
             let market_manager = market_manager.clone();
             let action_channel = action_channel.clone();
             let semaphore = semaphore.clone();
+            let key = subscription.key.clone();
+            let streams = subscription.streams.clone();
+            let symbol = key.symbol.clone();
 
             tasks.push(async move {
                 let permit = match semaphore.acquire_owned().await {
@@ -350,13 +468,15 @@ impl SessionManager {
                         return;
                     }
                 };
-
-                match market_manager.subscribe(symbol.clone()).await {
+                match market_manager
+                    .subscribe_with_streams(key.clone(), streams)
+                    .await
+                {
                     Ok(()) => {
                         info!("Auto-subscribed to symbol: {}", symbol);
-                        if let Err(e) = action_channel.send_event(SessionEvent::SubscriptionAdded {
-                            symbol: symbol.clone(),
-                        }) {
+                        if let Err(e) = action_channel
+                            .send_event(SessionEvent::SubscriptionAdded { key: key.clone() })
+                        {
                             error!(
                                 "Failed to emit SubscriptionAdded event for {}: {}",
                                 symbol, e
@@ -381,8 +501,8 @@ impl SessionManager {
 
         if enable_tui {
             if let Some(tx) = ui_event_tx {
-                let symbols = market_manager.list_subscriptions().await;
-                if let Err(e) = tx.send(SessionEvent::SubscriptionList { symbols }) {
+                let keys = market_manager.list_subscriptions().await;
+                if let Err(e) = tx.send(SessionEvent::SubscriptionList { keys }) {
                     error!("Failed to send subscription list to UI: {}", e);
                 }
             }
@@ -464,7 +584,7 @@ impl SessionManager {
             InteractiveCommand::Add { symbols } => self.handle_subscribe(symbols).await,
             InteractiveCommand::Remove { symbols } => self.handle_unsubscribe(symbols).await,
             InteractiveCommand::List => self.handle_list().await,
-            InteractiveCommand::Status => self.handle_status().await,
+            InteractiveCommand::Status => self.handle_status_command().await,
             InteractiveCommand::Show { symbol } => self.handle_show(symbol).await,
             InteractiveCommand::Config { action } => self.handle_config(action).await,
             InteractiveCommand::Reconnect => self.handle_reconnect().await,
@@ -477,12 +597,17 @@ impl SessionManager {
 
     /// Handle subscribe command
     async fn handle_subscribe(&mut self, symbols: Vec<String>) -> Result<()> {
+        let market_type = self.get_market_type();
         for symbol in symbols {
-            match self.market_manager.subscribe(symbol.clone()).await {
+            let key = MarketKey {
+                market_type,
+                symbol: symbol.clone(),
+            };
+            match self.market_manager.subscribe(key.clone()).await {
                 Ok(()) => {
                     info!("Subscribed to symbol: {}", symbol);
                     self.action_channel
-                        .send_event(SessionEvent::SubscriptionAdded { symbol })?;
+                        .send_event(SessionEvent::SubscriptionAdded { key })?;
                 }
                 Err(e) => {
                     error!("Failed to subscribe to {}: {}", symbol, e);
@@ -498,12 +623,17 @@ impl SessionManager {
 
     /// Handle unsubscribe command
     async fn handle_unsubscribe(&mut self, symbols: Vec<String>) -> Result<()> {
+        let market_type = self.get_market_type();
         for symbol in symbols {
-            match self.market_manager.unsubscribe(&symbol).await {
+            let key = MarketKey {
+                market_type,
+                symbol: symbol.clone(),
+            };
+            match self.market_manager.unsubscribe(&key).await {
                 Ok(()) => {
                     info!("Unsubscribed from symbol: {}", symbol);
                     self.action_channel
-                        .send_event(SessionEvent::SubscriptionRemoved { symbol })?;
+                        .send_event(SessionEvent::SubscriptionRemoved { key })?;
                 }
                 Err(e) => {
                     error!("Failed to unsubscribe from {}: {}", symbol, e);
@@ -530,7 +660,7 @@ impl SessionManager {
             Ok(()) => {
                 info!("Reconnect triggered for all active subscriptions");
                 // Provide latest status snapshot to UI/CLI
-                self.handle_status().await?;
+                self.handle_status_command().await?;
             }
             Err(e) => {
                 error!("Failed to trigger reconnect workflow: {}", e);
@@ -545,25 +675,25 @@ impl SessionManager {
 
     /// Handle list command
     async fn handle_list(&mut self) -> Result<()> {
-        let symbols = self.market_manager.list_subscriptions().await;
+        let keys = self.market_manager.list_subscriptions().await;
 
-        info!("Current subscriptions: {:?}", symbols);
+        info!("Current subscriptions: {:?}", keys);
 
         self.action_channel
-            .send_event(SessionEvent::SubscriptionList { symbols })?;
+            .send_event(SessionEvent::SubscriptionList { keys })?;
 
         Ok(())
     }
 
     /// Handle status command
-    async fn handle_status(&mut self) -> Result<()> {
-        let symbols = self.market_manager.list_subscriptions().await;
+    async fn handle_status_command(&mut self) -> Result<()> {
+        let keys = self.market_manager.list_subscriptions().await;
 
-        let status_info = super::action_channel::StatusInfo {
+        let status_info = StatusInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            state: format!("{:?}", self.state),
-            active_subscriptions: symbols.len(),
-            symbols,
+            state: "Running".to_string(),
+            active_subscriptions: keys.len(),
+            keys: keys.clone(),
             session_stats: self.stats.clone(),
         };
 
@@ -575,7 +705,11 @@ impl SessionManager {
 
     /// Handle show command
     async fn handle_show(&mut self, symbol: String) -> Result<()> {
-        if let Some(orderbook) = self.market_manager.get_orderbook(&symbol).await {
+        let key = MarketKey {
+            market_type: self.get_market_type(),
+            symbol: symbol.clone(),
+        };
+        if let Some(orderbook) = self.market_manager.get_orderbook(&key).await {
             self.action_channel
                 .send_event(SessionEvent::SymbolDetails {
                     symbol,
@@ -953,12 +1087,16 @@ impl SessionManager {
         debug!("Handling market event: {:?}", event);
 
         if let Some((symbol, price)) = match &event {
-            crate::market_data::MarketEvent::PriceUpdate { symbol, price, .. } => {
-                Some((symbol.clone(), *price))
+            crate::market_data::MarketEvent::PriceUpdate { key, price, .. } => {
+                let symbol = key.symbol.clone();
+                Some((symbol, *price))
             }
             crate::market_data::MarketEvent::TickerUpdate {
-                symbol, last_price, ..
-            } => Some((symbol.clone(), *last_price)),
+                key, last_price, ..
+            } => {
+                let symbol = key.symbol.clone();
+                Some((symbol, *last_price))
+            }
             _ => None,
         } {
             self.evaluate_alerts(&symbol, price)?;
@@ -1089,9 +1227,9 @@ impl SessionManager {
         }
 
         // Shutdown market data manager
-        let symbols = self.market_manager.list_subscriptions().await;
+        let subscriptions = self.market_manager.list_subscriptions().await;
 
-        for symbol in symbols {
+        for symbol in subscriptions {
             if let Err(e) = self.market_manager.unsubscribe(&symbol).await {
                 error!(
                     "Failed to unsubscribe from {} during shutdown: {}",
@@ -1129,5 +1267,81 @@ impl Drop for SessionManager {
         if self.state != SessionState::Terminated {
             warn!("SessionManager dropped without proper shutdown");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_cli(market: &str) -> Cli {
+        Cli {
+            command: Some(crate::cli::Commands::Ui {
+                simple: false,
+                market: market.to_string(),
+            }),
+            config_file: "config.toml".to_string(),
+            log_level: "info".to_string(),
+            verbose: false,
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn get_market_type_accepts_perp_aliases() {
+        let cli = make_cli("perp");
+        let session = SessionManager::new(&cli, Config::default()).unwrap();
+        assert_eq!(session.get_market_type(), MarketType::PerpUsdt);
+
+        let cli = make_cli("perp_usdt");
+        let session = SessionManager::new(&cli, Config::default()).unwrap();
+        assert_eq!(session.get_market_type(), MarketType::PerpUsdt);
+
+        let cli = make_cli("spot");
+        let session = SessionManager::new(&cli, Config::default()).unwrap();
+        assert_eq!(session.get_market_type(), MarketType::Spot);
+    }
+
+    #[test]
+    fn build_subscription_plan_includes_spot_and_perp_markets() {
+        let cli = make_cli("spot");
+        let mut config = Config::default();
+        config.symbols = Vec::new();
+        config.markets = vec![
+            crate::config::MarketConfig {
+                exchange: "binance".to_string(),
+                market_type: MarketType::Spot,
+                symbols: vec!["BTCUSDT".to_string()],
+                streams: vec!["trade".to_string()],
+            },
+            crate::config::MarketConfig {
+                exchange: "binance".to_string(),
+                market_type: MarketType::PerpUsdt,
+                symbols: vec!["BTCUSDT".to_string()],
+                streams: vec!["markPrice".to_string(), "openInterest".to_string()],
+            },
+        ];
+
+        let session = SessionManager::new(&cli, config).unwrap();
+        let plans = session.build_subscription_plan();
+        let mut plan_map = HashMap::new();
+        for plan in plans {
+            plan_map.insert(plan.key, plan.streams);
+        }
+
+        let spot_key = MarketKey::new(MarketType::Spot, "BTCUSDT".to_string());
+        let perp_key = MarketKey::new(MarketType::PerpUsdt, "BTCUSDT".to_string());
+
+        assert!(plan_map.contains_key(&spot_key));
+        assert!(plan_map.contains_key(&perp_key));
+
+        let spot_streams = plan_map.get(&spot_key).expect("spot streams");
+        assert!(spot_streams.contains(&MarketStream::Trade));
+        assert!(!spot_streams.contains(&MarketStream::MarkPrice));
+
+        let perp_streams = plan_map.get(&perp_key).expect("perp streams");
+        assert!(perp_streams.contains(&MarketStream::MarkPrice));
+        assert!(perp_streams.contains(&MarketStream::OpenInterest));
     }
 }

@@ -4,6 +4,13 @@
 # Trading symbols to monitor by default
 symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
+# Optional market-specific subscriptions (uncomment to enable)
+# [[markets]]
+# exchange = "binance"
+# market_type = "perp_usdt"
+# symbols = ["BTCUSDT", "ETHUSDT"]
+# streams = ["aggTrade", "depth", "ticker", "markPrice", "fundingRate", "openInterest"]
+
 # UI refresh rate in milliseconds
 refresh_rate_ms = 100
 
@@ -35,6 +42,11 @@ reconnect_interval_ms = 5000
 
 # Maximum reconnection attempts (0 = unlimited)
 max_reconnect_attempts = 10
+
+# Optional per-market overrides for Binance USDT-M perp
+# [binance.perp_usdt]
+# ws_url = "wss://fstream.binance.com"
+# rest_url = "https://fapi.binance.com"
 
 [ui]
 # Enable colors in terminal output

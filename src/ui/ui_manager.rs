@@ -8,6 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crossterm::event::{self, Event};
 
+use crate::binance::types::MarketKey;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::market_data::{DEFAULT_DAILY_CANDLE_LIMIT, MarketDataManager, MarketEvent};
@@ -87,6 +88,7 @@ impl UIManager {
         market_manager: Arc<MarketDataManager>,
         session_event_tx: mpsc::UnboundedSender<SessionEvent>,
         config: Config,
+        market_type: crate::binance::types::MarketType,
     ) -> Self {
         // Create event channels
         let (ui_event_tx, ui_event_rx) = mpsc::unbounded_channel();
@@ -100,7 +102,7 @@ impl UIManager {
             ui_event_tx,
             event_rx: Some(ui_event_rx),
             market_event_rx: Some(market_event_rx),
-            app_state: AppState::new(config.symbols.clone()),
+            app_state: AppState::new(Vec::new(), market_type),
             render_state: RenderState::default(),
             dry_run: false,
             config,
@@ -117,7 +119,12 @@ impl UIManager {
         session_event_tx: mpsc::UnboundedSender<SessionEvent>,
         config: Config,
     ) -> Self {
-        let mut ui_manager = Self::new(market_manager, session_event_tx, config);
+        let mut ui_manager = Self::new(
+            market_manager,
+            session_event_tx,
+            config,
+            crate::binance::types::MarketType::Spot,
+        );
         ui_manager.dry_run = true;
         ui_manager
     }
@@ -242,14 +249,18 @@ impl UIManager {
         info!("Initializing UI components");
 
         // Load initial symbols from market manager
-        let symbols = self.market_manager.list_subscriptions().await;
+        let subscriptions = self.market_manager.list_subscriptions().await;
+        let keys: Vec<MarketKey> = subscriptions
+            .into_iter()
+            .filter(|key| key.market_type == self.app_state.market_type)
+            .collect();
 
-        self.app_state.symbols = symbols;
+        self.app_state.market_keys = keys;
         self.app_state.normalize_selected_tab();
 
         info!(
             "UI initialized with {} symbols",
-            self.app_state.symbols.len()
+            self.app_state.market_keys.len()
         );
 
         let message = "Interactive mode ready. Press '/' for commands.";
@@ -435,7 +446,10 @@ impl UIManager {
 
         // Create a temporary command router to parse the command
         let command_router = crate::session::command_router::CommandRouter::new();
-        let default_symbol = self.app_state.current_symbol().map(|s| s.as_str());
+        let default_symbol = self
+            .app_state
+            .current_market_key()
+            .map(|key| key.symbol.as_str());
         let command_result =
             command_router.parse_interactive_command_with_default(input, default_symbol);
 
@@ -481,13 +495,14 @@ impl UIManager {
     /// Handle status command
     #[allow(dead_code)]
     async fn handle_status_command(&mut self) -> Result<()> {
-        let symbols = self.market_manager.list_subscriptions().await;
+        let subscriptions = self.market_manager.list_subscriptions().await;
+        let keys: Vec<MarketKey> = subscriptions.into_iter().collect();
 
         let status_info = StatusInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             state: "Running".to_string(),
-            active_subscriptions: symbols.len(),
-            symbols: symbols.clone(),
+            active_subscriptions: keys.len(),
+            keys: keys.clone(),
             session_stats: crate::session::session_manager::SessionStats::default(),
         };
 
@@ -518,36 +533,54 @@ impl UIManager {
                 self.render_state.queue_message(formatted);
                 self.app_state.push_log(format!("Error: {}", message));
             }
-            SessionEvent::SubscriptionAdded { symbol } => {
-                if !self.app_state.symbols.contains(&symbol) {
-                    self.app_state.symbols.push(symbol.clone());
+            SessionEvent::SubscriptionAdded { key } => {
+                if key.market_type == self.app_state.market_type
+                    && !self.app_state.market_keys.contains(&key)
+                {
+                    self.app_state.market_keys.push(key.clone());
                     self.app_state.normalize_selected_tab();
                     self.render_state
-                        .queue_message(format!("Subscribed to {}", symbol));
-                    self.app_state.push_log(format!("Subscribed to {}", symbol));
+                        .queue_message(format!("Subscribed to {}", key));
+                    self.app_state.push_log(format!("Subscribed to {}", key));
                 }
             }
-            SessionEvent::SubscriptionRemoved { symbol } => {
-                self.app_state.symbols.retain(|s| s != &symbol);
-                self.app_state.normalize_selected_tab();
-                self.render_state
-                    .queue_message(format!("Unsubscribed from {}", symbol));
-                self.app_state
-                    .push_log(format!("Unsubscribed from {}", symbol));
+            SessionEvent::SubscriptionRemoved { key } => {
+                if key.market_type == self.app_state.market_type {
+                    self.app_state.market_keys.retain(|k| k != &key);
+                    self.app_state.market_data.retain(|k, _| k != &key);
+                    self.app_state.normalize_selected_tab();
+                    self.render_state
+                        .queue_message(format!("Unsubscribed from {}", key));
+                    self.app_state
+                        .push_log(format!("Unsubscribed from {}", key));
+                }
             }
-            SessionEvent::SubscriptionList { symbols } => {
-                self.app_state.symbols = symbols.clone();
+            SessionEvent::SubscriptionList { keys } => {
+                let filtered: Vec<MarketKey> = keys
+                    .iter()
+                    .filter(|key| key.market_type == self.app_state.market_type)
+                    .cloned()
+                    .collect();
+                let display: Vec<String> = filtered.iter().map(|key| key.symbol.clone()).collect();
+
+                self.app_state.market_keys = filtered;
                 self.app_state.normalize_selected_tab();
                 self.render_state.queue_message(format!(
                     "Active subscriptions: {}",
-                    if symbols.is_empty() {
+                    if display.is_empty() {
                         "none".to_string()
                     } else {
-                        symbols.join(", ")
+                        display.join(", ")
                     }
                 ));
-                self.app_state
-                    .push_log(format!("Active subscriptions: {}", symbols.join(", ")));
+                self.app_state.push_log(format!(
+                    "Active subscriptions: {}",
+                    if display.is_empty() {
+                        "none".to_string()
+                    } else {
+                        display.join(", ")
+                    }
+                ));
             }
             SessionEvent::StatusInfo { info } => {
                 let message = format!(
@@ -556,7 +589,13 @@ impl UIManager {
                 );
                 self.render_state.info_message = Some(message.clone());
                 self.render_state.queue_message(message);
-                self.app_state.symbols = info.symbols.clone();
+                let filtered: Vec<MarketKey> = info
+                    .keys
+                    .iter()
+                    .filter(|key| key.market_type == self.app_state.market_type)
+                    .cloned()
+                    .collect();
+                self.app_state.market_keys = filtered;
                 self.app_state.normalize_selected_tab();
                 self.session_stats = info.session_stats.clone();
                 self.app_state.push_log(format!(
@@ -655,14 +694,28 @@ impl UIManager {
         debug!("Handling market event: {:?}", event);
         let mut should_redraw = false;
 
+        let event_market_type = match &event {
+            MarketEvent::PriceUpdate { key, .. } => key.market_type,
+            MarketEvent::TickerUpdate { key, .. } => key.market_type,
+            MarketEvent::OrderBookUpdate { key, .. } => key.market_type,
+            MarketEvent::ConnectionStatus { key, .. } => key.market_type,
+            MarketEvent::Error { key, .. } => key.market_type,
+            MarketEvent::DailyCandleUpdate { key, .. } => key.market_type,
+            MarketEvent::MarkPriceUpdate { key, .. } => key.market_type,
+            MarketEvent::FundingRateUpdate { key, .. } => key.market_type,
+            MarketEvent::OpenInterestUpdate { key, .. } => key.market_type,
+            MarketEvent::Liquidation { key, .. } => key.market_type,
+        };
+
+        if event_market_type != self.app_state.market_type {
+            return Ok(());
+        }
+
         match event {
-            MarketEvent::PriceUpdate {
-                symbol,
-                price,
-                time,
-            } => {
+            MarketEvent::PriceUpdate { key, price, time } => {
+                let symbol = key.symbol.clone();
                 // Update market data state
-                if let Some(market_data) = self.app_state.market_data.get_mut(&symbol) {
+                if let Some(market_data) = self.app_state.market_data.get_mut(&key) {
                     market_data.price = price;
                     market_data.price_history.push(PricePoint {
                         timestamp_ms: time,
@@ -679,7 +732,7 @@ impl UIManager {
                 } else {
                     // Create new market data entry
                     self.app_state.market_data.insert(
-                        symbol.clone(),
+                        key.clone(),
                         super::MarketDataState {
                             symbol: symbol.clone(),
                             price,
@@ -695,6 +748,11 @@ impl UIManager {
                             daily_candles: Vec::new(),
                             kline_render_cache: None,
                             last_kline_refresh: None,
+                            mark_price: None,
+                            index_price: None,
+                            funding_rate: None,
+                            next_funding_time: None,
+                            open_interest: None,
                         },
                     );
                     self.render_state
@@ -705,16 +763,17 @@ impl UIManager {
                 }
             }
             MarketEvent::TickerUpdate {
-                symbol,
+                key,
                 last_price,
                 price_change_percent,
                 high_price,
                 low_price,
                 volume,
             } => {
+                let symbol = key.symbol.clone();
                 use std::collections::hash_map::Entry;
 
-                let entry = self.app_state.market_data.entry(symbol.clone());
+                let entry = self.app_state.market_data.entry(key.clone());
                 let market_data = match entry {
                     Entry::Occupied(occupied) => occupied.into_mut(),
                     Entry::Vacant(vacant) => vacant.insert(super::MarketDataState {
@@ -730,15 +789,19 @@ impl UIManager {
                 market_data.low_24h = low_price;
                 should_redraw = true;
             }
-            MarketEvent::OrderBookUpdate { symbol, orderbook } => {
-                // Update orderbook
-                if let Some(market_data) = self.app_state.market_data.get_mut(&symbol) {
-                    market_data.orderbook = Some(orderbook);
-                    should_redraw = true;
-                }
+            MarketEvent::OrderBookUpdate { key, orderbook } => {
+                let symbol = key.symbol.clone();
+                let entry = self.app_state.market_data.entry(key.clone());
+                let market_data = entry.or_insert_with(|| super::MarketDataState {
+                    symbol: symbol.clone(),
+                    ..super::MarketDataState::default()
+                });
+                market_data.orderbook = Some(orderbook);
+                should_redraw = true;
             }
-            MarketEvent::ConnectionStatus { symbol, status } => {
-                debug!("Connection status for {}: {:?}", symbol, status);
+            MarketEvent::ConnectionStatus { key, status } => {
+                let symbol = key.symbol.clone();
+                debug!("Connection status for {:?}: {:?}", key, status);
                 if !matches!(status, crate::binance::types::ConnectionStatus::Connected) {
                     self.render_state
                         .queue_message(format!("Connection status for {}: {:?}", symbol, status));
@@ -766,89 +829,170 @@ impl UIManager {
                 should_redraw = true;
             }
             MarketEvent::DailyCandleUpdate {
-                symbol,
+                key,
                 mut candles,
                 is_snapshot,
             } => {
-                use std::collections::hash_map::Entry;
-
-                let entry = self.app_state.market_data.entry(symbol.clone());
-                let market_data = match entry {
-                    Entry::Occupied(occupied) => occupied.into_mut(),
-                    Entry::Vacant(vacant) => vacant.insert(super::MarketDataState {
-                        symbol: symbol.clone(),
-                        ..Default::default()
-                    }),
-                };
-
+                let symbol = key.symbol.clone();
+                let mut snapshot_msg = None;
                 let mut appended_closed = false;
 
-                if is_snapshot {
-                    market_data.daily_candles = candles;
-                    if market_data.daily_candles.len() > DEFAULT_DAILY_CANDLE_LIMIT {
-                        let overflow = market_data.daily_candles.len() - DEFAULT_DAILY_CANDLE_LIMIT;
-                        market_data.daily_candles.drain(0..overflow);
-                    }
+                {
+                    use std::collections::hash_map::Entry;
+                    let entry = self.app_state.market_data.entry(key.clone());
+                    let market_data = match entry {
+                        Entry::Occupied(occupied) => occupied.into_mut(),
+                        Entry::Vacant(vacant) => vacant.insert(super::MarketDataState {
+                            symbol: symbol.clone(),
+                            ..Default::default()
+                        }),
+                    };
 
-                    market_data
-                        .daily_candles
-                        .sort_by_key(|candle| candle.open_time_ms);
-
-                    self.render_state.queue_message(format!(
-                        "Loaded {} daily candles for {}",
-                        market_data.daily_candles.len(),
-                        symbol
-                    ));
-                    appended_closed = true; // force redraw on fresh snapshot
-                } else {
-                    for candle in candles.drain(..) {
-                        if let Some(existing) = market_data
-                            .daily_candles
-                            .iter_mut()
-                            .find(|existing| existing.open_time_ms == candle.open_time_ms)
-                        {
-                            if candle.is_closed && !existing.is_closed {
-                                appended_closed = true;
-                            }
-                            *existing = candle;
-                        } else {
-                            if candle.is_closed {
-                                appended_closed = true;
-                            }
-                            market_data.daily_candles.push(candle);
+                    if is_snapshot {
+                        market_data.daily_candles = candles;
+                        if market_data.daily_candles.len() > DEFAULT_DAILY_CANDLE_LIMIT {
+                            let overflow =
+                                market_data.daily_candles.len() - DEFAULT_DAILY_CANDLE_LIMIT;
+                            market_data.daily_candles.drain(0..overflow);
                         }
+
+                        market_data
+                            .daily_candles
+                            .sort_by_key(|candle| candle.open_time_ms);
+
+                        snapshot_msg = Some(format!(
+                            "Snapshot loaded for {}: {} candles",
+                            symbol,
+                            market_data.daily_candles.len()
+                        ));
+                        should_redraw = true;
+
+                        // Force cache rebuild
+                        market_data.invalidate_kline_cache();
+                    } else {
+                        for candle in candles.drain(..) {
+                            if let Some(existing) = market_data
+                                .daily_candles
+                                .iter_mut()
+                                .find(|c| c.open_time_ms == candle.open_time_ms)
+                            {
+                                // Update existing candle (streaming update)
+                                if candle.is_closed && !existing.is_closed {
+                                    appended_closed = true;
+                                }
+                                *existing = candle;
+                            } else {
+                                // New candle
+                                if candle.is_closed {
+                                    appended_closed = true;
+                                }
+                                market_data.daily_candles.push(candle);
+                            }
+                        }
+
+                        // Maintain size limit
+                        if market_data.daily_candles.len() > DEFAULT_DAILY_CANDLE_LIMIT {
+                            let overflow =
+                                market_data.daily_candles.len() - DEFAULT_DAILY_CANDLE_LIMIT;
+                            market_data.daily_candles.drain(0..overflow);
+                        }
+
+                        market_data
+                            .daily_candles
+                            .sort_by_key(|candle| candle.open_time_ms);
                     }
 
-                    if market_data.daily_candles.len() > DEFAULT_DAILY_CANDLE_LIMIT {
-                        let overflow = market_data.daily_candles.len() - DEFAULT_DAILY_CANDLE_LIMIT;
-                        market_data.daily_candles.drain(0..overflow);
-                    }
+                    market_data.invalidate_kline_cache();
 
-                    market_data
-                        .daily_candles
-                        .sort_by_key(|candle| candle.open_time_ms);
+                    let now = Instant::now();
+                    let refresh_interval =
+                        Duration::from_millis(self.config.refresh_rate_ms.max(16));
+                    if market_data.update_kline_refresh(
+                        now,
+                        refresh_interval,
+                        is_snapshot || appended_closed,
+                    ) {
+                        should_redraw = true;
+                    }
+                } // End modify app_state borrow
+
+                if let Some(msg) = snapshot_msg {
+                    self.render_state.queue_message(msg.clone());
+                    self.app_state.push_log(msg);
                 }
 
-                market_data.invalidate_kline_cache();
-
-                let now = Instant::now();
-                let refresh_interval =
-                    Duration::from_secs(self.config.ui.kline_refresh_secs.max(1));
-
-                if market_data.update_kline_refresh(
-                    now,
-                    refresh_interval,
-                    is_snapshot || appended_closed,
-                ) {
+                if appended_closed {
                     should_redraw = true;
                 }
             }
-            MarketEvent::Error { symbol, error } => {
+            MarketEvent::Error { key, error } => {
+                let symbol = key.symbol.clone();
                 let message = format!("Market error for {}: {}", symbol, error);
                 self.render_state.error_message = Some(message.clone());
                 self.render_state.queue_message(message);
                 self.app_state
                     .push_log(format!("Market error for {}: {}", symbol, error));
+                should_redraw = true;
+            }
+            MarketEvent::MarkPriceUpdate {
+                key,
+                mark_price,
+                index_price,
+                funding_rate,
+                next_funding_time,
+                ..
+            } => {
+                let symbol = key.symbol.clone();
+                let entry = self.app_state.market_data.entry(key.clone());
+                let market_data = entry.or_insert_with(|| super::MarketDataState {
+                    symbol: symbol.clone(),
+                    ..super::MarketDataState::default()
+                });
+                market_data.mark_price = Some(mark_price);
+                market_data.index_price = Some(index_price);
+                market_data.funding_rate = Some(funding_rate);
+                market_data.next_funding_time = Some(next_funding_time);
+                should_redraw = true;
+            }
+            MarketEvent::FundingRateUpdate {
+                key,
+                funding_rate,
+                funding_time,
+                ..
+            } => {
+                let symbol = key.symbol.clone();
+                let entry = self.app_state.market_data.entry(key.clone());
+                let market_data = entry.or_insert_with(|| super::MarketDataState {
+                    symbol: symbol.clone(),
+                    ..super::MarketDataState::default()
+                });
+                market_data.funding_rate = Some(funding_rate);
+                market_data.next_funding_time = Some(funding_time);
+                should_redraw = true;
+            }
+            MarketEvent::OpenInterestUpdate {
+                key, open_interest, ..
+            } => {
+                let symbol = key.symbol.clone();
+                let entry = self.app_state.market_data.entry(key.clone());
+                let market_data = entry.or_insert_with(|| super::MarketDataState {
+                    symbol: symbol.clone(),
+                    ..super::MarketDataState::default()
+                });
+                market_data.open_interest = Some(open_interest);
+                should_redraw = true;
+            }
+            MarketEvent::Liquidation {
+                key,
+                side,
+                price,
+                quantity,
+                ..
+            } => {
+                let message = format!("LIQUIDATION: {} {} {} @ {}", key, side, quantity, price);
+                self.render_state.queue_message(message.clone());
+                self.app_state.push_log(format!("[ALRT] {}", message));
+                self.app_state.push_notification(message);
                 should_redraw = true;
             }
         }

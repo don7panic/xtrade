@@ -3,6 +3,7 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+use crate::binance::types::MarketKey;
 use crate::config::Config;
 use crate::market_data::MarketEvent;
 use crate::metrics::ConnectionMetrics;
@@ -17,11 +18,11 @@ pub enum SessionEvent {
     /// Error event
     Error { message: String },
     /// Subscription added
-    SubscriptionAdded { symbol: String },
+    SubscriptionAdded { key: MarketKey },
     /// Subscription removed
-    SubscriptionRemoved { symbol: String },
+    SubscriptionRemoved { key: MarketKey },
     /// Subscription list
-    SubscriptionList { symbols: Vec<String> },
+    SubscriptionList { keys: Vec<MarketKey> },
     /// UI mode changed
     UIModeChanged { enable_tui: bool },
     /// Status information
@@ -72,7 +73,7 @@ pub struct StatusInfo {
     pub version: String,
     pub state: String,
     pub active_subscriptions: usize,
-    pub symbols: Vec<String>,
+    pub keys: Vec<MarketKey>,
     pub session_stats: super::session_manager::SessionStats,
 }
 

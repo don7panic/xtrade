@@ -7,10 +7,17 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::Path;
 
+use crate::binance::types::MarketType;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    /// List of trading symbols to monitor
+    /// List of trading symbols to monitor (Legacy: defaults to Spot)
+    #[serde(default)]
     pub symbols: Vec<String>,
+
+    /// List of configured markets (New)
+    #[serde(default)]
+    pub markets: Vec<MarketConfig>,
 
     /// UI refresh rate in milliseconds
     pub refresh_rate_ms: u64,
@@ -50,6 +57,36 @@ pub struct BinanceConfig {
 
     /// Maximum reconnection attempts
     pub max_reconnect_attempts: u32,
+
+    /// Per-market specific overrides (optional)
+    #[serde(default)]
+    pub perp_usdt: Option<PerpConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PerpConfig {
+    pub ws_url: String,
+    pub rest_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MarketConfig {
+    pub exchange: String, // e.g. "binance"
+    pub market_type: MarketType,
+    pub symbols: Vec<String>,
+    #[serde(default)]
+    pub streams: Vec<String>, // e.g. ["aggTrade", "depth", "markPrice"]
+}
+
+impl Default for MarketConfig {
+    fn default() -> Self {
+        Self {
+            exchange: "binance".to_string(),
+            market_type: MarketType::Spot,
+            symbols: vec![],
+            streams: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -78,6 +115,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             symbols: vec!["BTCUSDT".to_string()],
+            markets: vec![],
             refresh_rate_ms: 100,
             orderbook_depth: 20,
             enable_sparkline: true,
@@ -92,11 +130,12 @@ impl Default for Config {
 impl Default for BinanceConfig {
     fn default() -> Self {
         Self {
-            ws_url: "wss://stream.binance.com:9443".to_string(),
+            ws_url: "wss://stream.binance.com:9443/ws".to_string(),
             rest_url: "https://api.binance.com".to_string(),
             timeout_seconds: 10,
             reconnect_interval_ms: 1000,
             max_reconnect_attempts: 10,
+            perp_usdt: None,
         }
     }
 }
@@ -132,8 +171,25 @@ impl Config {
         // Apply environment variable overrides
         config.apply_env_overrides();
 
+        // Backward compatibility: If markets is empty but symbols is not, create a default Spot market
+        if config.markets.is_empty() && !config.symbols.is_empty() {
+            config.markets.push(MarketConfig {
+                exchange: "binance".to_string(), // Default exchange
+                market_type: MarketType::Spot,
+                symbols: config.symbols.clone(),
+                streams: vec![], // Default streams handled by code logic if empty
+            });
+        }
+
         config.validate()?;
         Ok(config)
+    }
+
+    fn ensure_perp_config(&mut self) -> &mut PerpConfig {
+        self.binance.perp_usdt.get_or_insert_with(|| PerpConfig {
+            ws_url: "wss://fstream.binance.com".to_string(),
+            rest_url: "https://fapi.binance.com".to_string(),
+        })
     }
 
     /// Apply environment variable overrides to configuration
@@ -210,6 +266,24 @@ impl Config {
             }
         }
 
+        // XTRADE_BINANCE_PERP_WS_URL - Perp WebSocket URL override
+        if let Ok(ws_url) = env::var("XTRADE_BINANCE_PERP_WS_URL") {
+            let ws_url = ws_url.trim();
+            if !ws_url.is_empty() {
+                let perp = self.ensure_perp_config();
+                perp.ws_url = ws_url.to_string();
+            }
+        }
+
+        // XTRADE_BINANCE_PERP_REST_URL - Perp REST API URL override
+        if let Ok(rest_url) = env::var("XTRADE_BINANCE_PERP_REST_URL") {
+            let rest_url = rest_url.trim();
+            if !rest_url.is_empty() {
+                let perp = self.ensure_perp_config();
+                perp.rest_url = rest_url.to_string();
+            }
+        }
+
         // UI-specific environment variables
         // XTRADE_UI_ENABLE_COLORS - enable colors
         if let Ok(enable_colors) = env::var("XTRADE_UI_ENABLE_COLORS") {
@@ -258,8 +332,8 @@ impl Config {
 
     /// Validate configuration values
     pub fn validate(&self) -> Result<()> {
-        if self.symbols.is_empty() {
-            anyhow::bail!("At least one symbol must be specified");
+        if self.symbols.is_empty() && self.markets.is_empty() {
+            anyhow::bail!("At least one symbol or market must be specified");
         }
 
         if self.refresh_rate_ms == 0 {

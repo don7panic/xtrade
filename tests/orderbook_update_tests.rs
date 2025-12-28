@@ -23,6 +23,7 @@ fn make_update(
             .into_iter()
             .map(|(p, q)| [p.to_string(), q.to_string()])
             .collect(),
+        prev_final_update_id: None,
     }
 }
 

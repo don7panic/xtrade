@@ -14,8 +14,8 @@ pub fn handle_key_event(app: &mut AppState, key_event: KeyEvent) -> UiAction {
         if let KeyCode::Char('a') = key_event.code {
             if !key_event.modifiers.contains(KeyModifiers::CONTROL) {
                 let preset = app
-                    .current_symbol()
-                    .and_then(|sym| app.market_data.get(sym))
+                    .current_market_key()
+                    .and_then(|key| app.market_data.get(key))
                     .map(|md| md.price);
                 if let Err(e) = app.activate_alert_popup(preset) {
                     app.push_notification(e);

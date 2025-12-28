@@ -8,7 +8,7 @@ pub mod tui;
 /// UI Manager for interactive interface
 pub mod ui_manager;
 
-use crate::binance::types::OrderBook;
+use crate::binance::types::{MarketKey, OrderBook};
 use crate::market_data::DailyCandle;
 use crate::metrics::ConnectionMetrics;
 use crate::session::alert_manager::{Alert, AlertDirection, AlertOptions, AlertRepeat};
@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 pub struct AppState {
     pub should_quit: bool,
     pub selected_tab: usize,
-    pub symbols: Vec<String>,
-    pub market_data: HashMap<String, MarketDataState>,
+    pub market_keys: Vec<MarketKey>,
+    pub market_data: HashMap<MarketKey, MarketDataState>,
     pub connection_metrics: ConnectionMetrics,
     pub paused: bool,
     pub log_messages: VecDeque<String>,
@@ -36,6 +36,7 @@ pub struct AppState {
     pub alert_form: AlertFormState,
     pub alerts: Vec<Alert>,
     pub selected_alert_index: usize,
+    pub market_type: crate::binance::types::MarketType,
 }
 
 /// Market data state for a single symbol
@@ -47,6 +48,11 @@ pub struct MarketDataState {
     pub volume_24h: f64,
     pub high_24h: f64,
     pub low_24h: f64,
+    pub mark_price: Option<f64>,
+    pub index_price: Option<f64>,
+    pub funding_rate: Option<f64>,
+    pub next_funding_time: Option<u64>,
+    pub open_interest: Option<f64>,
     pub orderbook: Option<OrderBook>,
     pub price_history: Vec<PricePoint>,
     pub daily_candles: Vec<DailyCandle>,
@@ -135,11 +141,14 @@ impl Default for AlertFormState {
 
 impl AppState {
     /// Create new application state
-    pub fn new(symbols: Vec<String>) -> Self {
+    pub fn new(
+        market_keys: Vec<MarketKey>,
+        market_type: crate::binance::types::MarketType,
+    ) -> Self {
         Self {
             should_quit: false,
             selected_tab: 0,
-            symbols,
+            market_keys,
             market_data: HashMap::new(),
             connection_metrics: ConnectionMetrics::default(),
             paused: false,
@@ -154,21 +163,22 @@ impl AppState {
             alert_form: AlertFormState::default(),
             alerts: Vec::new(),
             selected_alert_index: 0,
+            market_type,
         }
     }
 
     /// Move to next tab
     pub fn next_tab(&mut self) {
-        if !self.symbols.is_empty() {
-            self.selected_tab = (self.selected_tab + 1) % self.symbols.len();
+        if !self.market_keys.is_empty() {
+            self.selected_tab = (self.selected_tab + 1) % self.market_keys.len();
         }
     }
 
     /// Move to previous tab
     pub fn previous_tab(&mut self) {
-        if !self.symbols.is_empty() {
+        if !self.market_keys.is_empty() {
             self.selected_tab = if self.selected_tab == 0 {
-                self.symbols.len() - 1
+                self.market_keys.len() - 1
             } else {
                 self.selected_tab - 1
             };
@@ -176,8 +186,8 @@ impl AppState {
     }
 
     /// Get currently selected symbol
-    pub fn current_symbol(&self) -> Option<&String> {
-        self.symbols.get(self.selected_tab)
+    pub fn current_market_key(&self) -> Option<&MarketKey> {
+        self.market_keys.get(self.selected_tab)
     }
 
     /// Toggle pause state
@@ -187,19 +197,19 @@ impl AppState {
 
     /// Update focused symbol based on name
     pub fn focus_symbol(&mut self, symbol: &str) {
-        if let Some(idx) = self.symbols.iter().position(|s| s == symbol) {
+        if let Some(idx) = self.market_keys.iter().position(|key| key.symbol == symbol) {
             self.selected_tab = idx;
         }
     }
 
     /// Ensure selected tab remains in range after symbol list updates
     pub fn normalize_selected_tab(&mut self) {
-        if self.symbols.is_empty() {
+        if self.market_keys.is_empty() {
             self.selected_tab = 0;
             return;
         }
-        if self.selected_tab >= self.symbols.len() {
-            self.selected_tab = self.symbols.len() - 1;
+        if self.selected_tab >= self.market_keys.len() {
+            self.selected_tab = self.market_keys.len() - 1;
         }
     }
 
@@ -268,8 +278,8 @@ impl AppState {
     /// Enter alert popup mode using the current symbol and optional preset price
     pub fn activate_alert_popup(&mut self, preset_price: Option<f64>) -> Result<(), String> {
         let symbol = self
-            .current_symbol()
-            .cloned()
+            .current_market_key()
+            .map(|key| key.symbol.clone())
             .ok_or_else(|| "Select a symbol first".to_string())?;
 
         let price_string = preset_price
@@ -638,6 +648,11 @@ impl Default for MarketDataState {
             daily_candles: Vec::new(),
             kline_render_cache: None,
             last_kline_refresh: None,
+            mark_price: None,
+            index_price: None,
+            funding_rate: None,
+            next_funding_time: None,
+            open_interest: None,
         }
     }
 }
@@ -681,7 +696,19 @@ mod tests {
 
     #[test]
     fn test_app_state_navigation() {
-        let mut app = AppState::new(vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()]);
+        let mut app = AppState::new(
+            vec![
+                crate::binance::types::MarketKey::new(
+                    crate::binance::types::MarketType::Spot,
+                    "BTCUSDT".to_string(),
+                ),
+                crate::binance::types::MarketKey::new(
+                    crate::binance::types::MarketType::Spot,
+                    "ETHUSDT".to_string(),
+                ),
+            ],
+            crate::binance::types::MarketType::Spot,
+        );
         assert_eq!(app.selected_tab, 0);
 
         app.next_tab();
@@ -696,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_toggle_pause() {
-        let mut app = AppState::new(vec![]);
+        let mut app = AppState::new(Vec::new(), crate::binance::types::MarketType::Spot);
         assert!(!app.paused);
 
         app.toggle_pause();

@@ -14,20 +14,22 @@ pub(super) fn render_orderbook(
 ) {
     let block = Block::default().title(" Order Book ").borders(Borders::ALL);
 
-    let symbol = app.current_symbol().cloned().unwrap_or_default();
-    let market_data = if symbol.is_empty() {
-        None
-    } else {
-        app.market_data.get(&symbol).cloned()
-    };
+    let key = app.current_market_key().cloned();
+    let market_data = key
+        .as_ref()
+        .and_then(|key| app.market_data.get(key).cloned());
 
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
     if let Some(data) = market_data {
-        let orderbook = data
-            .orderbook
-            .unwrap_or_else(|| crate::binance::types::OrderBook::new(symbol.clone()));
+        let orderbook = data.orderbook.unwrap_or_else(|| {
+            crate::binance::types::OrderBook::new(
+                key.as_ref()
+                    .map(|key| key.symbol.clone())
+                    .unwrap_or_default(),
+            )
+        });
 
         let mut bid_rows: Vec<(OrderedFloat<f64>, f64)> = orderbook
             .bids

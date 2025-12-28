@@ -33,9 +33,9 @@ use anyhow::Result;
 use std::time::{Duration, Instant};
 
 use super::BinanceWebSocket;
-use super::rest::BinanceRestClient;
 use super::types::{BinanceMessage, OrderBook, OrderBookError, OrderBookUpdate, TradeMessage};
 use crate::AppResult;
+use crate::binance::BinanceRestClient;
 
 /// 消息类型分类枚举
 ///
