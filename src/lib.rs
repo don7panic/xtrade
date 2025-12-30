@@ -9,6 +9,7 @@ pub mod config;
 pub mod market_data;
 pub mod metrics;
 pub mod notify;
+pub mod paper_trading;
 pub mod session;
 pub mod ui;
 

@@ -1,15 +1,16 @@
 # XTrade
 
-XTrade is a Rust-based market data monitor focused on high-throughput Binance Spot streams. It launches as a long-lived interactive terminal session, combining resilient WebSocket ingestion, data integrity checks, and a ratatui-powered TUI for real-time visualization of prices, order books, metrics, and logs.
+XTrade is a Rust-based market data monitor for Binance Spot and USDT-M perp. It launches as a long-lived interactive terminal session, combining resilient WebSocket ingestion, data integrity checks, and a ratatui-powered TUI for real-time visualization of prices, order books, alerts, metrics, and logs.
 
 ## Features
 
-- Interactive session lifecycle with command router, action channels, and runtime help.
-- Concurrent Binance subscriptions (aggTrade, order book depth, 24h ticker) with snapshot + diff reconciliation and sequence validation.
-- Multi-panel terminal UI showing per-symbol quotes, top-of-book ladders, daily K-line trend panel, status bar indicators, and structured log panes.
-- Resilience primitives: heartbeats, exponential backoff reconnects, automatic re-sync via REST snapshots, and action-triggered reconnects.
-- Observability built in through `tracing` logs and `metrics` instrumentation (latency percentiles, throughput, reconnect counters).
-- Config-driven behavior supporting hot updates to refresh cadence, depth, color scheme, and Price Trend throttling.
+- Interactive TUI session with command palette and multi-panel layout (overview, order book, metrics + price trend, logs, alerts).
+- Binance Spot + USDT-M perp streams (trade, depth, 24h ticker, daily klines; perp adds mark price, funding rate, open interest, liquidation).
+- Order book snapshot + diff reconciliation with sequence validation and auto-resync.
+- Resilience primitives: heartbeats, exponential backoff reconnects, and action-triggered reconnects.
+- Alerts with in-TUI creation and desktop notifications.
+- Observability built in through `tracing` logs and `metrics` instrumentation (latency, throughput, reconnect counters).
+- Config-driven behavior with runtime tuning via `/config set` for `refresh_rate_ms`, `orderbook_depth`, and `ui.sparkline_points`.
 
 ## Getting Started
 
@@ -30,6 +31,9 @@ make run
 
 # Alternatively, run via cargo directly
 cargo run -- ui
+
+# Start in perp mode
+cargo run -- ui --market perp
 ```
 
 ## Configuration
@@ -40,7 +44,7 @@ Default settings live in `config.toml`; copy `config.toml.example` to get starte
 symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]  # default subscriptions
 refresh_rate_ms = 100                        # UI/poller cadence
 orderbook_depth = 20                         # levels rendered per side
-enable_sparkline = true                      # enable Price Trend panel
+enable_sparkline = true                      # legacy flag (currently unused)
 log_level = "info"                           # tracing filter
 
 [binance]
@@ -48,13 +52,22 @@ ws_url = "wss://stream.binance.com:9443"     # streaming endpoint
 rest_url = "https://api.binance.com"         # snapshot endpoint
 reconnect_interval_ms = 5000                 # base backoff
 
+[log]
+file_path = "logs"                           # directory for hourly log files
+
 [ui]
 enable_colors = true
 update_rate_fps = 20
 kline_refresh_secs = 60                      # throttle K-line redraws
+
+[[markets]]
+exchange = "binance"
+market_type = "perp_usdt"
+symbols = ["BTCUSDT", "ETHUSDT"]
+streams = ["aggTrade", "depth", "ticker", "markPrice", "fundingRate", "openInterest", "forceOrder"]
 ```
 
-Override values per environment using CLI flags or standard config sources supported by the `config` crate.
+`symbols` apply to the market selected by `--market`; use `[[markets]]` for explicit multi-market subscriptions.
 
 ## Project Layout
 
@@ -87,10 +100,10 @@ Additional developer guidance, troubleshooting tips, and CLI usage examples are 
 
 ## Roadmap
 
-First-phase deliverables focus on market data visualization and observability. Planned second-phase capabilities include:
+Planned next-phase capabilities include:
 
 - Trading actions (order entry, cancel, position tracking).
-- Alerting system for conditional price triggers and notifications.
+- Alert history, persistence, and external notification channels.
 - Persistent storage (e.g., SQLite) for historical data and replay.
 - API credential management and secure configuration handling.
 

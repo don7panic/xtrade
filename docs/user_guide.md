@@ -8,12 +8,13 @@ XTrade is a high-performance cryptocurrency market data monitoring system built 
 2. [Command Line Interface](#command-line-interface)
 3. [Global Flags](#global-flags)
 4. [Subcommands](#subcommands)
-5. [Configuration File](#configuration-file)
-6. [Environment Variables](#environment-variables)
-7. [TUI Keyboard Shortcuts](#tui-keyboard-shortcuts)
-8. [Troubleshooting](#troubleshooting)
-9. [Performance Tips](#performance-tips)
-10. [Development Usage](#development-usage)
+5. [Interactive Commands (TUI)](#interactive-commands-tui)
+6. [Configuration File](#configuration-file)
+7. [Environment Variables](#environment-variables)
+8. [TUI Keyboard Shortcuts](#tui-keyboard-shortcuts)
+9. [Troubleshooting](#troubleshooting)
+10. [Performance Tips](#performance-tips)
+11. [Development Usage](#development-usage)
 
 ## Installation and Prerequisites
 
@@ -66,8 +67,10 @@ xtrade --help
 XTrade uses a command-line interface built with `clap`. The basic syntax is:
 
 ```bash
-xtrade [GLOBAL_FLAGS] COMMAND [COMMAND_FLAGS]
+xtrade [GLOBAL_FLAGS] [COMMAND] [COMMAND_FLAGS]
 ```
+
+If no command is provided, XTrade defaults to `ui`.
 
 ### Getting Help
 
@@ -76,7 +79,7 @@ xtrade [GLOBAL_FLAGS] COMMAND [COMMAND_FLAGS]
 xtrade --help
 
 # Command-specific help
-xtrade subscribe --help
+xtrade ui --help
 xtrade config --help
 ```
 
@@ -89,8 +92,7 @@ XTrade provides several global flags that apply to all commands:
 Specify a custom configuration file path. Defaults to `config.toml` in the current directory.
 
 ```bash
-xtrade --config-file /path/to/custom/config.toml subscribe BTCUSDT
-xtrade --config-file ~/.config/xtrade/config.toml status
+xtrade --config-file /path/to/custom/config.toml ui
 ```
 
 ### `--log-level <LEVEL>`
@@ -98,7 +100,7 @@ xtrade --config-file ~/.config/xtrade/config.toml status
 Set the logging level. Available levels: `trace`, `debug`, `info`, `warn`, `error`. Default: `info`.
 
 ```bash
-xtrade --log-level debug subscribe BTCUSDT
+xtrade --log-level debug ui
 xtrade --log-level trace ui
 ```
 
@@ -107,132 +109,39 @@ xtrade --log-level trace ui
 Enable verbose output (equivalent to `--log-level debug`). This flag takes precedence over `--log-level`.
 
 ```bash
-xtrade --verbose subscribe BTCUSDT
-xtrade --verbose --log-level info status  # Uses debug level due to --verbose
+xtrade --verbose ui
+xtrade --verbose --log-level info ui  # Uses debug level due to --verbose
+```
+
+### `--dry-run`
+
+Show the welcome page and configuration summary without starting the TUI.
+
+```bash
+xtrade --dry-run
 ```
 
 ## Subcommands
-
-### `subscribe` - Subscribe to Market Data
-
-Subscribe to one or more trading symbols for real-time market data monitoring.
-
-```bash
-# Subscribe to single symbol
-xtrade subscribe BTCUSDT
-
-# Subscribe to multiple symbols
-xtrade subscribe BTCUSDT ETHUSDT BNBUSDT
-
-# Subscribe with custom config
-xtrade --config-file custom.toml subscribe BTCUSDT
-```
-
-**Implementation Status**: Fully implemented with WebSocket connection and real-time data processing.
-
-
-### `unsubscribe` - Unsubscribe from Market Data
-
-Unsubscribe from one or more trading symbols.
-
-```bash
-# Unsubscribe from single symbol
-xtrade unsubscribe BTCUSDT
-
-# Unsubscribe from multiple symbols
-xtrade unsubscribe ETHUSDT BNBUSDT
-```
-
-**Implementation Status**: Fully implemented with WebSocket disconnection and cleanup.
-
-
-### `list` - List Subscribed Symbols
-
-Display currently subscribed trading symbols.
-
-```bash
-xtrade list
-```
-
-**Output**:
-
-```text
-📋 Subscribed symbols:
-1. BTCUSDT
-2. ETHUSDT
-3. BNBUSDT
-```
-
-**Implementation Status**: Fully implemented with real-time subscription tracking.
-
 
 ### `ui` - Start Terminal User Interface
 
 Launch the interactive terminal user interface for real-time market data visualization.
 
 ```bash
-# Start full TUI mode
+# Start full TUI mode (default command)
+xtrade
+
+# Explicit TUI mode
 xtrade ui
 
-# Start simple CLI mode
-xtrade ui --simple
+# Start perp UI mode
+xtrade ui --market perp
 ```
 
 **Options**:
 
-- `--simple`: Use simple CLI output instead of full TUI
-
-**Implementation Status**: Basic CLI output implemented. Full TUI interface planned for future development.
-
-
-### `status` - Show System Status
-
-Display system status including connection information and active subscriptions.
-
-```bash
-xtrade status
-```
-
-**Output**:
-
-```text
-🔍 XTrade Status:
-   Connection: Connected
-   Subscriptions: 3
-   Active symbols: BTCUSDT, ETHUSDT, BNBUSDT
-   Latency P95: 45ms
-   Messages/sec: 12.5
-   Reconnects: 0
-```
-
-**Implementation Status**: Fully implemented with real-time connection metrics.
-
-
-### `show` - Show Symbol Details
-
-Display detailed information for a specific trading symbol.
-
-```bash
-# Show BTCUSDT details
-xtrade show BTCUSDT
-
-# Show ETHUSDT details
-xtrade show ETHUSDT
-```
-
-**Output**:
-
-```sh
-📊 BTCUSDT Details:
-   Current Price: $42,123.45
-   24h Change: +2.34%
-   24h Volume: $1.2B
-   Bid/Ask Spread: $0.50
-   OrderBook Depth: 20 levels
-```
-
-**Implementation Status**: Fully implemented with real-time orderbook data.
-
+- `--market`: `spot` (default), `perp`, `perp_usdt`, or `perp-usdt`
+- `--simple`: Parsed but currently runs the same TUI (reserved for future simple output)
 
 ### `config` - Configuration Management
 
@@ -257,7 +166,7 @@ xtrade config set log_level debug
 xtrade config set symbols '["BTCUSDT","ETHUSDT"]'
 ```
 
-**Note**: The `config set` command is parsed but not yet fully implemented. Configuration changes must be made via config file or environment variables.
+**Note**: The CLI `config set` command is parsed but not implemented yet. Use the config file or environment variables for persistent changes.
 
 #### Reset Configuration
 
@@ -266,7 +175,52 @@ xtrade config set symbols '["BTCUSDT","ETHUSDT"]'
 xtrade config reset
 ```
 
-**Implementation Status**: Configuration file loading and environment variable overrides fully implemented. CLI-based configuration modification is limited (only `config show` and `config reset` work).
+**Note**: `config reset` prints defaults to stdout; it does not write to disk.
+**Note**: `xtrade config` currently reads `./config.toml` regardless of `--config-file`.
+
+### `demo` - WebSocket Demo
+
+Run a WebSocket demo workflow useful for debugging or validation.
+
+```bash
+xtrade demo
+```
+
+## Interactive Commands (TUI)
+
+Press `/` or `:` in the TUI to open the command palette, then enter commands.
+
+### Subscription and Status
+
+- `/add <symbol1> [symbol2] ...` - Subscribe to symbols
+- `/remove <symbol1> [symbol2] ...` - Unsubscribe from symbols
+- `/list` or `pairs` - List active subscriptions
+- `/status` - Show session statistics and connection status
+- `/reconnect` or `/r` - Force reconnection and resync
+- `/logs` - Show recent logs
+
+### Configuration (in-memory)
+
+- `/config show` - Show current configuration
+- `/config set <key> <value>` - Update in-memory config (supported keys: `refresh_rate_ms`, `orderbook_depth`, `ui.sparkline_points` (min 10))
+- `/config reset` - Reset to defaults in-memory
+
+Changes from `/config set` are not persisted to `config.toml`.
+
+### Alerts
+
+- `a` (in normal mode) opens the alert popup for the current symbol
+- `/alert:list` - List alerts in the log panel
+- `/alert:clear <id|all>` - Clear an alert by id or clear all
+
+### Help and Exit
+
+- `/help` or `?` - Show help in the log panel
+- `/quit` `/exit` `/q` - Exit the application
+
+### Notes
+
+- `/show <symbol>` is accepted but does not render a dedicated details panel yet.
 
 ## Configuration File
 
@@ -276,16 +230,22 @@ XTrade uses TOML format configuration files. The default configuration file is `
 
 ### Default Configuration Location
 
-- **Linux/macOS**: `./config.toml` or `~/.config/xtrade/config.toml`
-- **Windows**: `config.toml` or `%APPDATA%\xtrade\config.toml`
+- Default: `./config.toml` (or any path passed via `--config-file`)
 
 ### Configuration Structure
 
 ```toml
 # XTrade Configuration File
 
-# Trading symbols to monitor by default
+# Trading symbols to monitor by default (applies to the `--market` selection)
 symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+
+# Optional explicit market subscriptions (spot/perp)
+[[markets]]
+exchange = "binance"
+market_type = "perp_usdt"
+symbols = ["BTCUSDT", "ETHUSDT"]
+streams = ["aggTrade", "depth", "ticker", "markPrice", "fundingRate", "openInterest", "forceOrder"]
 
 # UI refresh rate in milliseconds
 refresh_rate_ms = 100
@@ -293,11 +253,15 @@ refresh_rate_ms = 100
 # OrderBook depth to display (number of price levels)
 orderbook_depth = 20
 
-# Enable price sparkline charts in TUI
+# Legacy sparkline flag (currently unused)
 enable_sparkline = true
 
 # Logging level (trace, debug, info, warn, error)
 log_level = "info"
+
+[log]
+# Directory for hourly log files
+file_path = "logs"
 
 [binance]
 # Binance WebSocket URL
@@ -315,6 +279,10 @@ reconnect_interval_ms = 1000
 # Maximum reconnection attempts
 max_reconnect_attempts = 10
 
+[binance.perp_usdt]
+ws_url = "wss://fstream.binance.com"
+rest_url = "https://fapi.binance.com"
+
 [ui]
 # Enable colors in terminal output
 enable_colors = true
@@ -324,18 +292,22 @@ update_rate_fps = 20
 
 # Sparkline history points
 sparkline_points = 60
+
+# Minimum seconds between daily kline redraws
+kline_refresh_secs = 60
 ```
 
 ### Configuration Options
 
 #### Global Settings
 
-- `symbols`: Array of trading symbols to monitor (e.g., `["BTCUSDT", "ETHUSDT"]`)
+- `symbols`: Array of trading symbols (applies to the `--market` selection)
+- `markets`: Explicit multi-market subscriptions (`exchange`, `market_type` = `spot` or `perp_usdt`, `symbols`, optional `streams`)
 - `refresh_rate_ms`: UI refresh interval in milliseconds (100-1000 recommended)
 - `orderbook_depth`: Number of price levels to display in orderbook (10-50)
-- `enable_sparkline`: Enable/disable price sparkline charts
+- `enable_sparkline`: Legacy flag (currently unused)
 - `log_level`: Logging verbosity level
-- `log.file_path`: Destination for file-based logs. Files are rotated hourly using local time with the pattern `<prefix>-<YYYY-MM-DD-HH><suffix>` (defaults to `xtrade-YYYY-MM-DD-HH.log`).
+- `log.file_path`: Directory for hourly log files (prefix `xtrade.log`)
 
 #### Binance Settings
 
@@ -344,6 +316,7 @@ sparkline_points = 60
 - `timeout_seconds`: HTTP request timeout
 - `reconnect_interval_ms`: Delay between reconnection attempts
 - `max_reconnect_attempts`: Maximum reconnection attempts before giving up
+- `binance.perp_usdt.*`: Optional overrides for USDT-M perp endpoints
 
 **Implementation Status**: Binance REST API and WebSocket clients are fully implemented with connection management, error handling, and reconnection logic.
 
@@ -351,7 +324,8 @@ sparkline_points = 60
 
 - `enable_colors`: Enable colored terminal output
 - `update_rate_fps`: TUI refresh rate in frames per second
-- `sparkline_points`: Number of historical points for sparkline charts
+- `sparkline_points`: Number of historical points cached for price history
+- `kline_refresh_secs`: Minimum seconds between daily kline redraws
 
 ### Example Configurations
 
@@ -366,23 +340,18 @@ log_level = "info"
 file_path = "logs"
 ```
 
-#### High-Frequency Trading Configuration
+#### Perp Configuration
 
 ```toml
-symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
-refresh_rate_ms = 50
-orderbook_depth = 30
-enable_sparkline = true
-log_level = "warn"
+[[markets]]
+exchange = "binance"
+market_type = "perp_usdt"
+symbols = ["BTCUSDT", "ETHUSDT"]
+streams = ["aggTrade", "depth", "ticker", "markPrice", "fundingRate", "openInterest", "forceOrder"]
 
-[binance]
-timeout_seconds = 5
-reconnect_interval_ms = 500
-max_reconnect_attempts = 20
-
-[ui]
-update_rate_fps = 30
-sparkline_points = 120
+[binance.perp_usdt]
+ws_url = "wss://fstream.binance.com"
+rest_url = "https://fapi.binance.com"
 ```
 
 ## Environment Variables
@@ -404,7 +373,7 @@ export XTRADE_ORDERBOOK_DEPTH=25
 # Log level
 export XTRADE_LOG_LEVEL=debug
 
-# Log file location (hourly rotation)
+# Log directory (hourly rotation)
 export XTRADE_LOG_FILE_PATH=/var/log
 
 # Binance WebSocket URL
@@ -422,6 +391,15 @@ export XTRADE_BINANCE_RECONNECT_INTERVAL_MS=1000
 # Maximum reconnection attempts
 export XTRADE_BINANCE_MAX_RECONNECT_ATTEMPTS=10
 
+# Perp WebSocket URL override
+export XTRADE_BINANCE_PERP_WS_URL=wss://fstream.binance.com
+
+# Perp REST API URL override
+export XTRADE_BINANCE_PERP_REST_URL=https://fapi.binance.com
+
+# Enable legacy sparkline flag
+export XTRADE_ENABLE_SPARKLINE=true
+
 # Enable colors in UI
 export XTRADE_UI_ENABLE_COLORS=true
 
@@ -430,13 +408,16 @@ export XTRADE_UI_UPDATE_RATE_FPS=20
 
 # Sparkline history points
 export XTRADE_UI_SPARKLINE_POINTS=60
+
+# Minimum seconds between kline redraws
+export XTRADE_UI_KLINE_REFRESH_SECS=60
 ```
 
 ### Usage Examples
 
 ```bash
 # Temporary configuration override
-XTRADE_SYMBOLS=BTCUSDT,ETHUSDT XTRADE_LOG_LEVEL=debug xtrade subscribe
+XTRADE_SYMBOLS=BTCUSDT,ETHUSDT XTRADE_LOG_LEVEL=debug xtrade ui
 
 # Persistent configuration
 export XTRADE_SYMBOLS=BTCUSDT,ETHUSDT
@@ -448,33 +429,39 @@ xtrade ui
 
 When using the Terminal User Interface (`xtrade ui`), the following keyboard shortcuts are available:
 
-**Implementation Status**: Basic CLI output is implemented. Full TUI interface with keyboard shortcuts is planned for future development. Currently, the `ui` command provides simple CLI output with real-time data display.
+### Navigation and Command Palette
 
-### Navigation
-
+- `/` or `:`: Open the command palette
 - `←` / `→` / `↑` / `↓`: Switch between symbol tabs
 - `j` / `k`: Scroll through logs
+- `A` (Shift + A): Open alerts list (also runs `/alert:list`)
 
 ### Control
 
-- `q` or `Esc`: Quit the application
-- `r`: Force reconnect to Binance
-- `p`: Pause/resume data updates
-- `s`: Save current snapshot to file
-- `h`: Show help screen
+- `q`, `Ctrl+C`, or `Ctrl+D`: Quit the application
+- `p`, `Space`, or `Ctrl+P`: Toggle pause state (currently UI indicator only)
+- `Esc`: Exit command/alert modes
 
-### View Management
+### Quick Actions
 
-- `+` / `-`: Increase/decrease orderbook depth
-- `c`: Toggle color mode
-- `f`: Toggle fullscreen mode
+- `s`: Prefill `/status` in the command palette
+- `L` (Shift + L): Prefill `/logs` in the command palette
+- `a`: Open the alert popup for the current symbol
 
-### Data Display
+### Alerts View
 
-- `1`-`9`: Switch to specific symbol tab
-- `a`: Show/hide asks (sell orders)
-- `b`: Show/hide bids (buy orders)
-- `l`: Show/hide latency statistics
+- `j` / `k` or `↑` / `↓`: Move selection
+- `d` or `Delete`: Remove selected alert
+- `C` (Shift + C): Clear all alerts
+- `r`: Refresh alert list
+- `q` or `Esc`: Exit alerts view
+
+### Alert Popup
+
+- `↑` / `↓`: Cycle through fields
+- `Tab`: Toggle direction/mode when the field is active
+- `Enter`: Submit alert
+- `Esc`: Cancel
 
 ## Troubleshooting
 
@@ -525,13 +512,13 @@ curl https://api.binance.com/api/v3/ping
 
 ```bash
 # Enable debug logging
-xtrade --log-level debug subscribe BTCUSDT
+xtrade --log-level debug ui
 
 # Enable trace logging for maximum detail
 xtrade --log-level trace ui
 
-# Log to file
-xtrade --log-level debug subscribe BTCUSDT 2> xtrade.log
+# Logs are written to the directory in log.file_path (hourly rotation)
+XTRADE_LOG_FILE_PATH=logs xtrade --log-level debug ui
 ```
 
 ### Common Error Messages
@@ -598,7 +585,6 @@ cargo build
 cargo build --release
 
 # Run directly with cargo
-cargo run -- subscribe BTCUSDT
 cargo run -- ui
 ```
 
@@ -645,13 +631,13 @@ cargo test --doc
 
 ```bash
 # Run with debug logging
-RUST_LOG=debug cargo run -- subscribe BTCUSDT
+RUST_LOG=debug cargo run -- ui
 
 # Run with backtrace on error
-RUST_BACKTRACE=1 cargo run -- subscribe BTCUSDT
+RUST_BACKTRACE=1 cargo run -- ui
 
 # Profile CPU usage
-cargo flamegraph --bin xtrade -- subscribe BTCUSDT
+cargo flamegraph --bin xtrade -- ui
 ```
 
 ## Support and Resources
@@ -669,4 +655,4 @@ cargo flamegraph --bin xtrade -- subscribe BTCUSDT
 
 ---
 
-*This documentation reflects the current implementation status of XTrade. The system is fully functional with real-time market data processing, WebSocket connections, and comprehensive configuration management. Future development will focus on enhancing the TUI interface and adding advanced features.*
+*This documentation reflects the current implementation status of XTrade. The system supports real-time market data processing, TUI visualization, alerts, and configuration management. Future development will focus on trading workflows, alert persistence, and data storage.*
