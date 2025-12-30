@@ -34,6 +34,14 @@ pub enum InteractiveCommand {
     Help,
     /// Manage price alerts
     Alert { action: AlertAction },
+    /// Paper Trading: Buy
+    Buy { symbol: String, quantity: f64 },
+    /// Paper Trading: Sell
+    Sell { symbol: String, quantity: f64 },
+    /// Paper Trading: View Portfolio
+    Portfolio,
+    /// Paper Trading: View Orders
+    Orders,
 }
 
 /// Alert subcommands
@@ -59,7 +67,7 @@ pub struct CommandInfo {
 }
 
 /// Static help descriptions used for interactive commands
-const HELP_LINES: [&str; 13] = [
+const HELP_LINES: [&str; 18] = [
     "XTrade Interactive Commands:",
     "  /add <symbol1> [symbol2] ...  - Subscribe to symbols",
     "  /remove <symbol1> [symbol2] ... - Unsubscribe from symbols",
@@ -73,10 +81,15 @@ const HELP_LINES: [&str; 13] = [
     "  /alert:clear <id|all>         - Clear alerts",
     "  /help                         - Show this help",
     "  /quit                         - Exit the application",
+    "  Paper Trading Commands:",
+    "  /buy <symbol> <qty>           - Simulate buy order",
+    "  /sell <symbol> <qty>          - Simulate sell order",
+    "  /portfolio                    - View paper portfolio",
+    "  /orders                       - View paper order history",
 ];
 
 /// Static list of interactive commands with descriptions for UI surfaces
-const COMMANDS: [CommandInfo; 12] = [
+const COMMANDS: [CommandInfo; 16] = [
     CommandInfo {
         trigger: "/add",
         usage: "/add <symbol1> [symbol2] ...",
@@ -136,6 +149,26 @@ const COMMANDS: [CommandInfo; 12] = [
         trigger: "/quit",
         usage: "/quit",
         description: "Exit the application",
+    },
+    CommandInfo {
+        trigger: "/buy",
+        usage: "/buy <symbol> <qty>",
+        description: "Paper Trading: Buy",
+    },
+    CommandInfo {
+        trigger: "/sell",
+        usage: "/sell <symbol> <qty>",
+        description: "Paper Trading: Sell",
+    },
+    CommandInfo {
+        trigger: "/portfolio",
+        usage: "/portfolio",
+        description: "Paper Trading: View Portfolio",
+    },
+    CommandInfo {
+        trigger: "/orders",
+        usage: "/orders",
+        description: "Paper Trading: View Orders",
     },
 ];
 
@@ -322,6 +355,28 @@ impl CommandRouter {
                     action: AlertAction::Clear { target },
                 }))
             }
+            "/buy" => {
+                if parts.len() < 3 {
+                    return Err(anyhow::anyhow!("Usage: /buy <symbol> <quantity>"));
+                }
+                let symbol = parts[1].to_uppercase();
+                let quantity = parts[2]
+                    .parse::<f64>()
+                    .map_err(|_| anyhow::anyhow!("Invalid quantity '{}'", parts[2]))?;
+                Ok(Some(InteractiveCommand::Buy { symbol, quantity }))
+            }
+            "/sell" => {
+                if parts.len() < 3 {
+                    return Err(anyhow::anyhow!("Usage: /sell <symbol> <quantity>"));
+                }
+                let symbol = parts[1].to_uppercase();
+                let quantity = parts[2]
+                    .parse::<f64>()
+                    .map_err(|_| anyhow::anyhow!("Invalid quantity '{}'", parts[2]))?;
+                Ok(Some(InteractiveCommand::Sell { symbol, quantity }))
+            }
+            "/portfolio" | "/pf" => Ok(Some(InteractiveCommand::Portfolio)),
+            "/orders" => Ok(Some(InteractiveCommand::Orders)),
             "/help" | "?" => Ok(Some(InteractiveCommand::Help)),
             "/logs" => Ok(Some(InteractiveCommand::Logs)),
             "/quit" | "/exit" | "/q" => Ok(Some(InteractiveCommand::Quit)),

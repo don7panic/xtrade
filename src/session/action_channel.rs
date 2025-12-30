@@ -7,6 +7,7 @@ use crate::binance::types::MarketKey;
 use crate::config::Config;
 use crate::market_data::MarketEvent;
 use crate::metrics::ConnectionMetrics;
+use crate::paper_trading::{PaperOrder, PaperPortfolio};
 use crate::session::alert_manager::{Alert, AlertDirection, AlertOptions};
 use crate::session::command_router::InteractiveCommand;
 
@@ -65,6 +66,14 @@ pub enum SessionEvent {
     },
     /// User command from interactive input
     UserCommand { command: InteractiveCommand },
+    /// Paper Trading: Order filled
+    OrderFilled { order: PaperOrder },
+    /// Paper Trading: Portfolio update (real-time)
+    PortfolioUpdate { portfolio: PaperPortfolio },
+    /// Paper Trading: Portfolio snapshot (command response)
+    PortfolioSnapshot { portfolio: PaperPortfolio },
+    /// Paper Trading: Order history snapshot (command response)
+    OrderHistorySnapshot { orders: Vec<PaperOrder> },
 }
 
 /// Status information for session

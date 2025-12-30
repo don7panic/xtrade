@@ -19,6 +19,7 @@ use crate::ui::ui_manager::UIManager;
 use super::action_channel::{ActionChannel, SessionEvent, StatusInfo};
 use super::alert_manager::{AlertDirection, AlertManager, AlertOptions, AlertRepeat, AlertTrigger};
 use super::command_router::{AlertAction, ClearTarget, CommandRouter, InteractiveCommand};
+use crate::paper_trading::{Decimal, PaperTradingEngine};
 
 /// Session state tracking
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +122,10 @@ pub struct SessionManager {
     shutdown_tx: mpsc::Sender<()>,
     /// Shutdown signal receiver
     shutdown_rx: Option<mpsc::Receiver<()>>,
+    /// Paper trading engine
+    paper_engine: PaperTradingEngine,
+    /// Last known prices for paper trading execution
+    last_prices: HashMap<String, Decimal>,
 }
 
 impl SessionManager {
@@ -140,24 +145,11 @@ impl SessionManager {
         // Create action channel
         let action_channel = ActionChannel::new();
 
-        // Create alert manager
-        let alert_manager = AlertManager::new();
-
-        // Create system notifier (macOS implemented, extensible for Windows)
-        let system_notifier = SystemNotifier::new(env!("CARGO_PKG_NAME"));
-
-        // Create session config from CLI
-        let session_config = SessionConfig {
-            enable_tui: true,            // Default to TUI mode
-            enable_metrics: true,        // Default to metrics collection
-            auto_subscribe: true,        // Default to auto-subscribe
-            session_timeout_ms: 3600000, // 1 hour default timeout
-        };
-
-        let metrics_interval = Duration::from_millis(app_config.refresh_rate_ms.max(50));
+        // Alert manager
+        let alert_manager = AlertManager::default();
 
         Ok(Self {
-            config: session_config,
+            config: SessionConfig::default(),
             app_config,
             cli: cli.clone(),
             state: SessionState::Starting,
@@ -168,13 +160,15 @@ impl SessionManager {
             metrics_collector: None,
             metrics_status: MetricsConnectionStatus::Disconnected,
             metrics_last_emit: Instant::now(),
-            metrics_emit_interval: metrics_interval,
+            metrics_emit_interval: Duration::from_millis(100),
             command_router,
             action_channel,
             alert_manager,
-            system_notifier,
+            system_notifier: SystemNotifier::new(env!("CARGO_PKG_NAME")),
             shutdown_tx,
             shutdown_rx: Some(shutdown_rx),
+            paper_engine: PaperTradingEngine::new(),
+            last_prices: HashMap::new(),
         })
     }
 
@@ -592,6 +586,14 @@ impl SessionManager {
             InteractiveCommand::Logs => self.handle_logs().await,
             InteractiveCommand::Help => self.handle_help().await,
             InteractiveCommand::Alert { action } => self.handle_alert(action).await,
+            InteractiveCommand::Buy { symbol, quantity } => {
+                self.handle_paper_buy(symbol, quantity).await
+            }
+            InteractiveCommand::Sell { symbol, quantity } => {
+                self.handle_paper_sell(symbol, quantity).await
+            }
+            InteractiveCommand::Portfolio => self.handle_paper_portfolio().await,
+            InteractiveCommand::Orders => self.handle_paper_orders().await,
         }
     }
 
@@ -1082,6 +1084,73 @@ impl SessionManager {
         }
     }
 
+    /// Handle paper buy command
+    async fn handle_paper_buy(&mut self, symbol: String, quantity: f64) -> Result<()> {
+        let price = self.get_market_price(&symbol).await?;
+        let qty = Decimal::from_f64_retain(quantity)
+            .ok_or_else(|| anyhow::anyhow!("Invalid quantity"))?;
+
+        info!("Paper Buy: {} {} @ {}", quantity, symbol, price);
+        let order = self.paper_engine.buy(&symbol, qty, price)?;
+
+        // Emit events
+        self.action_channel.send_event(SessionEvent::OrderFilled {
+            order: order.clone(),
+        })?;
+
+        let portfolio = self.paper_engine.portfolio().clone();
+        self.forward_to_ui(SessionEvent::PortfolioUpdate { portfolio });
+
+        Ok(())
+    }
+
+    /// Handle paper sell command
+    async fn handle_paper_sell(&mut self, symbol: String, quantity: f64) -> Result<()> {
+        let price = self.get_market_price(&symbol).await?;
+        let qty = Decimal::from_f64_retain(quantity)
+            .ok_or_else(|| anyhow::anyhow!("Invalid quantity"))?;
+
+        info!("Paper Sell: {} {} @ {}", quantity, symbol, price);
+        let order = self.paper_engine.sell(&symbol, qty, price)?;
+
+        // Emit events
+        self.action_channel.send_event(SessionEvent::OrderFilled {
+            order: order.clone(),
+        })?;
+
+        let portfolio = self.paper_engine.portfolio().clone();
+        self.forward_to_ui(SessionEvent::PortfolioUpdate { portfolio });
+
+        Ok(())
+    }
+
+    /// Handle portfolio view
+    async fn handle_paper_portfolio(&mut self) -> Result<()> {
+        let portfolio = self.paper_engine.portfolio().clone();
+        self.forward_to_ui(SessionEvent::PortfolioSnapshot { portfolio });
+        Ok(())
+    }
+
+    /// Handle orders view
+    async fn handle_paper_orders(&mut self) -> Result<()> {
+        let orders = self.paper_engine.portfolio().order_history.clone();
+        self.forward_to_ui(SessionEvent::OrderHistorySnapshot {
+            orders: orders.into(),
+        });
+        Ok(())
+    }
+
+    /// Get current market price (best effort)
+    async fn get_market_price(&self, symbol: &str) -> Result<Decimal> {
+        if let Some(price) = self.last_prices.get(symbol) {
+            return Ok(*price);
+        }
+        Err(anyhow::anyhow!(
+            "No price data available for {}. Please wait for market data.",
+            symbol
+        ))
+    }
+
     /// Handle market event
     async fn handle_market_event(&mut self, event: crate::market_data::MarketEvent) -> Result<()> {
         debug!("Handling market event: {:?}", event);
@@ -1089,6 +1158,15 @@ impl SessionManager {
         if let Some((symbol, price)) = match &event {
             crate::market_data::MarketEvent::PriceUpdate { key, price, .. } => {
                 let symbol = key.symbol.clone();
+
+                // Update paper trading engine
+                let decimal_price = Decimal::from_f64_retain(*price).unwrap_or(Decimal::ZERO);
+                self.last_prices.insert(symbol.clone(), decimal_price);
+                self.paper_engine.on_price_update(&symbol, decimal_price);
+
+                // Update UI if needed (maybe throttle this in future)
+                // For now we rely on explicit portfolio requests or significant updates
+
                 Some((symbol, *price))
             }
             crate::market_data::MarketEvent::TickerUpdate {

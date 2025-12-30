@@ -391,10 +391,10 @@ sequenceDiagram
 - [x] 单元测试
 
 ### Phase 3: 命令集成（Day 4）
-- [ ] 扩展 `InteractiveCommand`
-- [ ] 扩展 `CommandRouter` 解析
-- [ ] 扩展 `SessionEvent`
-- [ ] `SessionManager` 集成 `PaperTradingEngine`
+- [x] 扩展 `InteractiveCommand`
+- [x] 扩展 `CommandRouter` 解析
+- [x] 扩展 `SessionEvent`
+- [x] `SessionManager` 集成 `PaperTradingEngine`
 
 ### Phase 4: TUI 面板（Day 5-6）
 - [ ] 实现 `render/portfolio.rs`
