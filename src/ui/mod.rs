@@ -735,8 +735,10 @@ mod tests {
 
     #[test]
     fn kline_cache_limits_samples_by_width() {
-        let mut state = MarketDataState::default();
-        state.symbol = "TESTUSDT".to_string();
+        let mut state = MarketDataState {
+            symbol: "TESTUSDT".to_string(),
+            ..Default::default()
+        };
 
         for idx in 0..20 {
             state.daily_candles.push(DailyCandle::new(
