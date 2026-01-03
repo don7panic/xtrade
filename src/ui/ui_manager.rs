@@ -13,6 +13,7 @@ use crate::cli::Cli;
 use crate::config::Config;
 use crate::market_data::{DEFAULT_DAILY_CANDLE_LIMIT, MarketDataManager, MarketEvent};
 use crate::metrics::ConnectionStatus as MetricsConnectionStatus;
+use crate::paper_trading::{Decimal, PaperOrder};
 use crate::session::action_channel::{SessionEvent, StatusInfo};
 use crate::session::session_manager::SessionStats;
 
@@ -678,6 +679,43 @@ impl UIManager {
                     }
                 }
             }
+            SessionEvent::OrderFilled { order } => {
+                let message = format!(
+                    "Paper order filled: {} {} {} @ {}",
+                    order.side,
+                    format_decimal(order.quantity, 6),
+                    order.symbol,
+                    format_decimal(order.fill_price, 2)
+                );
+                self.render_state.queue_message(message.clone());
+                self.app_state.push_log(message);
+            }
+            SessionEvent::PortfolioUpdate { portfolio } => {
+                self.app_state.paper_portfolio = portfolio;
+                self.render_state
+                    .queue_message("Portfolio updated".to_string());
+            }
+            SessionEvent::PortfolioSnapshot { portfolio } => {
+                self.app_state.paper_portfolio = portfolio;
+                self.render_state
+                    .queue_message("Portfolio snapshot updated".to_string());
+            }
+            SessionEvent::OrderHistorySnapshot { orders } => {
+                let order_lines: Vec<String> = orders.iter().map(format_order_log).collect();
+                self.app_state.paper_portfolio.order_history = orders.into_iter().collect();
+                if order_lines.is_empty() {
+                    self.render_state
+                        .queue_message("No paper orders recorded".to_string());
+                    self.app_state
+                        .push_log("[orders] No paper orders recorded".to_string());
+                } else {
+                    self.render_state
+                        .queue_message("Order history listed in log panel".to_string());
+                    for line in order_lines {
+                        self.app_state.push_log(format!("[orders] {}", line));
+                    }
+                }
+            }
             SessionEvent::MarketEvent(event) => {
                 self.handle_market_event(event).await?;
             }
@@ -714,6 +752,11 @@ impl UIManager {
         match event {
             MarketEvent::PriceUpdate { key, price, time } => {
                 let symbol = key.symbol.clone();
+                if let Some(decimal_price) = Decimal::from_f64_retain(price) {
+                    self.app_state
+                        .paper_portfolio
+                        .update_price(&symbol, decimal_price);
+                }
                 // Update market data state
                 if let Some(market_data) = self.app_state.market_data.get_mut(&key) {
                     market_data.price = price;
@@ -771,6 +814,11 @@ impl UIManager {
                 volume,
             } => {
                 let symbol = key.symbol.clone();
+                if let Some(decimal_price) = Decimal::from_f64_retain(last_price) {
+                    self.app_state
+                        .paper_portfolio
+                        .update_price(&symbol, decimal_price);
+                }
                 use std::collections::hash_map::Entry;
 
                 let entry = self.app_state.market_data.entry(key.clone());
@@ -1028,4 +1076,19 @@ impl UIManager {
     pub fn get_app_state(&self) -> &AppState {
         &self.app_state
     }
+}
+
+fn format_decimal(value: Decimal, scale: u32) -> String {
+    value.round_dp(scale).to_string()
+}
+
+fn format_order_log(order: &PaperOrder) -> String {
+    format!(
+        "#{} {} {} {} @ {}",
+        order.id,
+        order.side,
+        format_decimal(order.quantity, 6),
+        order.symbol,
+        format_decimal(order.fill_price, 2)
+    )
 }

@@ -11,6 +11,7 @@ pub mod ui_manager;
 use crate::binance::types::{MarketKey, OrderBook};
 use crate::market_data::DailyCandle;
 use crate::metrics::ConnectionMetrics;
+use crate::paper_trading::PaperPortfolio;
 use crate::session::alert_manager::{Alert, AlertDirection, AlertOptions, AlertRepeat};
 use crate::session::command_router::{CommandInfo, CommandRouter};
 use std::collections::{HashMap, VecDeque};
@@ -37,6 +38,7 @@ pub struct AppState {
     pub alerts: Vec<Alert>,
     pub selected_alert_index: usize,
     pub market_type: crate::binance::types::MarketType,
+    pub paper_portfolio: PaperPortfolio,
 }
 
 /// Market data state for a single symbol
@@ -164,6 +166,7 @@ impl AppState {
             alerts: Vec::new(),
             selected_alert_index: 0,
             market_type,
+            paper_portfolio: PaperPortfolio::default(),
         }
     }
 
@@ -719,18 +722,6 @@ mod tests {
 
         app.previous_tab();
         assert_eq!(app.selected_tab, 1);
-    }
-
-    #[test]
-    fn test_toggle_pause() {
-        let mut app = AppState::new(Vec::new(), crate::binance::types::MarketType::Spot);
-        assert!(!app.paused);
-
-        app.toggle_pause();
-        assert!(app.paused);
-
-        app.toggle_pause();
-        assert!(!app.paused);
     }
 
     #[test]

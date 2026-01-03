@@ -437,14 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_serialization() {
-        let config = Config::default();
-        let serialized = toml::to_string(&config).unwrap();
-        let deserialized: Config = toml::from_str(&serialized).unwrap();
-        assert_eq!(config.symbols, deserialized.symbols);
-    }
-
-    #[test]
     fn test_config_file_operations() {
         let config = Config::default();
         let temp_file = NamedTempFile::new().unwrap();

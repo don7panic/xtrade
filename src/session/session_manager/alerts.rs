@@ -109,6 +109,7 @@ impl AlertingState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn add_from_ui(
         &mut self,
         symbol: String,

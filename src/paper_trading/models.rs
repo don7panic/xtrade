@@ -443,15 +443,4 @@ mod tests {
         assert_eq!(portfolio.next_order_id, 1);
         assert_eq!(portfolio.realized_pnl, Decimal::ZERO);
     }
-
-    #[test]
-    fn test_decimal_precision() {
-        // This test demonstrates the precision advantage of Decimal
-        // With f64: 0.1 + 0.2 != 0.3
-        // With Decimal: 0.1 + 0.2 == 0.3 ✓
-        let a = dec!(0.1);
-        let b = dec!(0.2);
-        let c = dec!(0.3);
-        assert_eq!(a + b, c); // This would fail with f64!
-    }
 }

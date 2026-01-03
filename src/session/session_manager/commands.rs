@@ -3,6 +3,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::binance::types::MarketKey;
 use crate::cli::ConfigAction;
+use crate::paper_trading::{Decimal, PaperOrder, PaperPortfolio};
+use std::collections::VecDeque;
 
 use super::SessionManager;
 use crate::session::action_channel::{LogsInfo, SessionEvent, StatusInfo};
@@ -342,16 +344,117 @@ impl SessionManager {
     /// Handle portfolio view
     async fn handle_paper_portfolio(&mut self) -> Result<()> {
         let portfolio = self.paper_trading.portfolio_snapshot();
-        self.forward_to_ui(SessionEvent::PortfolioSnapshot { portfolio });
+        if self.config.enable_tui && self.ui_event_tx.is_some() {
+            self.forward_to_ui(SessionEvent::PortfolioSnapshot { portfolio });
+        } else {
+            print_portfolio(&portfolio);
+        }
         Ok(())
     }
 
     /// Handle orders view
     async fn handle_paper_orders(&mut self) -> Result<()> {
         let orders = self.paper_trading.order_history_snapshot();
-        self.forward_to_ui(SessionEvent::OrderHistorySnapshot {
-            orders: orders.into(),
-        });
+        if self.config.enable_tui && self.ui_event_tx.is_some() {
+            self.forward_to_ui(SessionEvent::OrderHistorySnapshot {
+                orders: orders.into(),
+            });
+        } else {
+            print_order_history(&orders);
+        }
         Ok(())
+    }
+}
+
+fn print_portfolio(portfolio: &PaperPortfolio) {
+    println!();
+    println!("Paper Portfolio");
+    println!("Positions: {}", portfolio.open_position_count());
+    println!(
+        "Unrealized PnL: {}",
+        format_signed_decimal(portfolio.total_unrealized_pnl(), 2)
+    );
+    println!(
+        "Realized PnL: {}",
+        format_signed_decimal(portfolio.realized_pnl, 2)
+    );
+    println!(
+        "Total Value: {}",
+        format_decimal(portfolio.total_market_value(), 2)
+    );
+    println!();
+
+    let mut positions: Vec<_> = portfolio
+        .positions
+        .values()
+        .filter(|pos| !pos.is_empty())
+        .collect();
+    positions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+
+    if positions.is_empty() {
+        println!("No open positions.");
+        println!();
+        return;
+    }
+
+    println!(
+        "{:<10} {:>12} {:>12} {:>12} {:>12} {:>8}",
+        "Symbol", "Qty", "AvgCost", "Last", "PnL", "PnL%"
+    );
+
+    for position in positions {
+        let pnl = format_signed_decimal(position.unrealized_pnl, 2);
+        let pnl_pct = format_signed_decimal(position.unrealized_pnl_pct, 2);
+        println!(
+            "{:<10} {:>12} {:>12} {:>12} {:>12} {:>7}%",
+            position.symbol,
+            format_decimal(position.quantity, 6),
+            format_decimal(position.avg_cost, 2),
+            format_decimal(position.current_price, 2),
+            pnl,
+            pnl_pct
+        );
+    }
+    println!();
+}
+
+fn print_order_history(orders: &VecDeque<PaperOrder>) {
+    println!();
+    println!("Paper Orders (most recent first)");
+    if orders.is_empty() {
+        println!("No orders yet.");
+        println!();
+        return;
+    }
+
+    println!(
+        "{:<6} {:<6} {:<10} {:>12} {:>12} {:>12}",
+        "ID", "Side", "Symbol", "Qty", "Price", "Value"
+    );
+
+    for order in orders.iter().rev() {
+        println!(
+            "{:<6} {:<6} {:<10} {:>12} {:>12} {:>12}",
+            order.id,
+            order.side,
+            order.symbol,
+            format_decimal(order.quantity, 6),
+            format_decimal(order.fill_price, 2),
+            format_decimal(order.total_value(), 2)
+        );
+    }
+    println!();
+}
+
+fn format_decimal(value: Decimal, scale: u32) -> String {
+    value.round_dp(scale).to_string()
+}
+
+fn format_signed_decimal(value: Decimal, scale: u32) -> String {
+    let rounded = value.round_dp(scale);
+    if rounded.is_sign_negative() || rounded.is_zero() {
+        rounded.to_string()
+    } else {
+        format!("+{}", rounded)
     }
 }

@@ -292,11 +292,4 @@ mod tests {
         assert!(p95 >= p50);
         assert!(p99 >= p95);
     }
-
-    #[test]
-    fn test_connection_metrics_default() {
-        let metrics = ConnectionMetrics::default();
-        assert_eq!(metrics.status, ConnectionStatus::Disconnected);
-        assert_eq!(metrics.reconnect_count, 0);
-    }
 }

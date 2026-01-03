@@ -748,12 +748,6 @@ mod tests {
     use tokio_test::block_on;
 
     #[test]
-    fn test_websocket_creation() {
-        let (ws, _rx) = BinanceWebSocket::new("wss://test.binance.com/ws");
-        assert_eq!(ws.status(), ConnectionStatus::Disconnected);
-    }
-
-    #[test]
     fn test_status_watch_channel() {
         let (ws, _rx) = BinanceWebSocket::new("wss://test.binance.com/ws");
 

@@ -38,6 +38,9 @@ impl PaperTradingState {
                 key, last_price, ..
             } => {
                 let symbol = key.symbol.clone();
+                let decimal_price = Decimal::from_f64_retain(*last_price).unwrap_or(Decimal::ZERO);
+                self.last_prices.insert(symbol.clone(), decimal_price);
+                self.engine.on_price_update(&symbol, decimal_price);
                 Some((symbol, *last_price))
             }
             _ => None,

@@ -3,9 +3,9 @@ mod command_palette;
 mod header;
 mod layout;
 mod logs;
-mod metrics;
 mod orderbook;
 mod overview;
+mod portfolio;
 mod price_trend;
 
 use ratatui::Frame;
@@ -19,9 +19,10 @@ use self::alerts::render_alerts_overlay;
 use self::command_palette::render_command_palette;
 use self::header::render_header;
 use self::logs::render_logs;
-use self::metrics::render_metrics;
 use self::orderbook::render_orderbook;
 use self::overview::render_symbol_overview;
+use self::portfolio::render_portfolio;
+use self::price_trend::render_price_trend;
 
 pub(super) fn render_root(
     frame: &mut Frame<'_>,
@@ -33,10 +34,9 @@ pub(super) fn render_root(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(10),
-            Constraint::Length(10),
-            Constraint::Length(6),
+            Constraint::Length(4),
         ])
         .split(frame.size());
 
@@ -51,12 +51,23 @@ pub(super) fn render_root(
         ])
         .split(chunks[1]);
 
-    render_symbol_overview(frame, body_chunks[0], app);
-    render_orderbook(frame, body_chunks[1], app, orderbook_depth);
-    render_metrics(frame, body_chunks[2], app);
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(10), Constraint::Length(6)])
+        .split(body_chunks[0]);
+    render_symbol_overview(frame, left_chunks[0], app);
+    render_logs(frame, left_chunks[1], app, render_state);
 
-    render_logs(frame, chunks[2], app, render_state);
-    render_command_palette(frame, chunks[3], app, render_state);
+    render_orderbook(frame, body_chunks[1], app, orderbook_depth);
+
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Ratio(3, 5), Constraint::Ratio(2, 5)])
+        .split(body_chunks[2]);
+    render_portfolio(frame, right_chunks[0], app);
+    render_price_trend(frame, right_chunks[1], app);
+
+    render_command_palette(frame, chunks[2], app, render_state);
 
     if matches!(app.input_mode, InputMode::Alerts) {
         render_alerts_overlay(frame, app);

@@ -6,14 +6,8 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
 
 use crate::ui::AppState;
 
-pub(super) fn render_metrics(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(4)])
-        .split(area);
-
-    render_latency_gauges(frame, chunks[0], app);
-    render_price_trend(frame, chunks[1], app);
+pub(super) fn render_metrics(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    render_latency_gauges(frame, area, app);
 }
 
 fn render_latency_gauges(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -70,8 +64,4 @@ fn render_latency_gauges(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), sub[0]);
     frame.render_widget(gauge, sub[1]);
-}
-
-fn render_price_trend(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
-    super::price_trend::render_price_trend(frame, area, app);
 }

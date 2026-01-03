@@ -47,24 +47,46 @@ pub(super) fn render_header(
         Style::default().fg(Color::Gray),
     );
 
-    let body = vec![Line::from(vec![
-        title,
-        Span::raw(" "),
-        status,
-        Span::raw(" "),
-        commands,
-        Span::raw(" "),
+    let metrics = &app.connection_metrics;
+    let metrics_line = Line::from(vec![
         Span::styled(
-            if app.paused { "PAUSED" } else { "LIVE" },
-            if app.paused {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Green)
-            },
+            format!("P95 {}ms", metrics.latency_p95),
+            Style::default().fg(Color::Magenta),
         ),
-    ])];
+        Span::raw("  "),
+        Span::styled(
+            format!("Msg/s {:.1}", metrics.messages_per_second),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw("  "),
+        Span::raw(format!("Rec {}", metrics.reconnect_count)),
+        Span::raw("  "),
+        Span::raw(format!("Err {}", metrics.error_count)),
+        Span::raw("  "),
+        Span::raw(format!("Up {}s", metrics.uptime_seconds)),
+    ]);
+
+    let body = vec![
+        Line::from(vec![
+            title,
+            Span::raw(" "),
+            status,
+            Span::raw(" "),
+            commands,
+            Span::raw(" "),
+            Span::styled(
+                if app.paused { "PAUSED" } else { "LIVE" },
+                if app.paused {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Green)
+                },
+            ),
+        ]),
+        metrics_line,
+    ];
 
     let block = Block::default().borders(Borders::ALL).title(" Session ");
 
